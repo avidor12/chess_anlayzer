@@ -2,10 +2,12 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#1b1d22" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+    <meta name="theme-color" content="#121418" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="description" content="Scan a chess board with your phone and get the best move for both sides." />
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="icon" href="./icon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="./icon.svg" />
@@ -13,123 +15,200 @@
   </head>
   <body>
     <header class="topbar">
-      <h1>♞ Chess Scanner</h1>
+      <div class="brand"><span class="logo">♞</span> Chess Scanner</div>
+      <button id="menuBtn" class="icon-btn" aria-label="More options" hidden>⋯</button>
     </header>
 
-    <main>
-      <!-- 1. SCAN -->
-      <section class="card" id="scanCard">
-        <h2><span class="step">1</span> Scan the board</h2>
-        <p class="hint">Take a photo from a player's side of the board, with the whole board in frame and good light.</p>
-        <div class="row">
-          <label class="btn primary grow">
-            📷 Take photo
-            <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden />
-          </label>
-          <label class="btn grow">
-            🖼️ Choose image
-            <input id="galleryInput" type="file" accept="image/*" hidden />
-          </label>
+    <main id="app">
+      <!-- HOME -->
+      <section id="home" class="home">
+        <div class="hero-art" aria-hidden="true">
+          <div class="hero-board"></div>
+          <div class="hero-scan"></div>
         </div>
-
-        <div id="cornerStep" hidden>
-          <p class="hint step-hint">Drag the 4 circles onto the <b>corners of the 64 squares</b> (not the outer frame) so the grid lines up with the board.</p>
-          <div id="photoWrap" class="photo-wrap">
-            <img id="preview" class="photo" alt="Board photo" />
-            <svg id="overlay" class="overlay"></svg>
-          </div>
-          <div id="loupe" class="loupe" hidden><canvas width="140" height="140"></canvas></div>
-          <button id="readBtn" class="btn primary block">🔍 Read the board</button>
+        <h1>Snap a board,<br />get the best move.</h1>
+        <p class="lead">Point your camera at a chess board. The app reads the position and tells each player their best move — all on your phone.</p>
+        <button id="scanBtn" class="btn primary xl">
+          <span class="ico">📷</span> Scan a board
+        </button>
+        <div class="row two">
+          <button id="uploadBtn" class="btn ghost">🖼️ Upload photo</button>
+          <button id="manualBtn" class="btn ghost">✏️ Set up by hand</button>
         </div>
-        <div id="scanStatus" class="status" hidden></div>
+        <ul class="tips">
+          <li>Shoot from a player's side, the whole board in view</li>
+          <li>Good light, no strong glare</li>
+          <li>Works offline after the first scan</li>
+        </ul>
       </section>
 
-      <!-- 2. POSITION -->
-      <section class="card" id="positionCard">
-        <h2><span class="step">2</span> Check the position</h2>
-        <p class="hint">Tap a square, then pick a piece to fix any mistakes. Squares outlined in red are ones the scanner was unsure about.</p>
-
-        <div class="board-wrap">
-          <div id="evalBar" class="eval-bar" aria-label="Evaluation bar">
-            <div id="evalFill" class="eval-fill"></div>
-            <span id="evalLabel" class="eval-label">0.0</span>
+      <!-- RESULT -->
+      <section id="result" hidden>
+        <div class="verdict-card">
+          <div class="verdict-top">
+            <div id="verdict" class="verdict">—</div>
+            <div id="thinking" class="thinking" hidden><span class="dot-pulse"></span>analyzing</div>
           </div>
-          <div class="board-holder">
-            <div id="board" class="board"></div>
-            <svg id="arrows" class="arrows" viewBox="0 0 800 800" aria-hidden="true">
-              <defs>
-                <marker id="headW" markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto">
-                  <path d="M0,0 L4,2 L0,4 Z" fill="#3fa9f5" />
-                </marker>
-                <marker id="headB" markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto">
-                  <path d="M0,0 L4,2 L0,4 Z" fill="#f5793f" />
-                </marker>
-              </defs>
-            </svg>
+          <div class="hbar" aria-label="Evaluation">
+            <div id="hbarFill" class="hbar-fill"></div>
+            <div class="hbar-mid"></div>
           </div>
-        </div>
-
-        <div id="palette" class="palette" hidden></div>
-
-        <div class="row wrap tools">
-          <button id="flipBtn" class="btn small">⇅ Flip view</button>
-          <button id="rotateBtn" class="btn small">⟳ Rotate pieces 90°</button>
-          <button id="startBtn" class="btn small">Start position</button>
-          <button id="clearBtn" class="btn small">Clear</button>
-        </div>
-
-        <details class="castling">
-          <summary>Castling rights &amp; FEN</summary>
-          <div class="row wrap">
-            <label><input type="checkbox" id="cK" /> White O-O</label>
-            <label><input type="checkbox" id="cQ" /> White O-O-O</label>
-            <label><input type="checkbox" id="ck" /> Black O-O</label>
-            <label><input type="checkbox" id="cq" /> Black O-O-O</label>
+          <div class="hbar-legend">
+            <span>White <b id="pctW">50%</b></span>
+            <span id="evalNum" class="eval-num">0.0</span>
+            <span><b id="pctB">50%</b> Black</span>
           </div>
-          <div class="row">
-            <input id="fenInput" class="fen" spellcheck="false" autocomplete="off" />
-            <button id="fenLoad" class="btn small">Load</button>
-          </div>
-        </details>
-      </section>
-
-      <!-- 3. ANALYSIS -->
-      <section class="card" id="analysisCard">
-        <h2><span class="step">3</span> Analysis</h2>
-        <div class="row">
-          <span class="label">Whose turn?</span>
-          <div class="seg" role="radiogroup">
-            <button class="seg-btn active" data-turn="w">White</button>
-            <button class="seg-btn" data-turn="b">Black</button>
+          <div class="turn-row">
+            <span>To move</span>
+            <div class="seg" role="radiogroup" aria-label="Side to move">
+              <button class="seg-btn active" data-turn="w"><span class="pawn w"></span>White</button>
+              <button class="seg-btn" data-turn="b"><span class="pawn b"></span>Black</button>
+            </div>
           </div>
         </div>
-        <div class="row">
-          <span class="label">Depth</span>
-          <div class="seg" role="radiogroup">
-            <button class="seg-btn" data-time="1500">Fast</button>
-            <button class="seg-btn active" data-time="4000">Normal</button>
-            <button class="seg-btn" data-time="10000">Deep</button>
-          </div>
-        </div>
-        <button id="analyzeBtn" class="btn primary block">♟ Analyze position</button>
 
-        <div id="verdict" class="verdict" hidden></div>
+        <div class="board-holder">
+          <div id="board" class="board"></div>
+          <svg id="arrows" class="arrows" viewBox="0 0 800 800" aria-hidden="true">
+            <defs>
+              <marker id="headW" markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto">
+                <path d="M0,0 L4,2 L0,4 Z" fill="#3fa9f5" />
+              </marker>
+              <marker id="headB" markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto">
+                <path d="M0,0 L4,2 L0,4 Z" fill="#f5793f" />
+              </marker>
+            </defs>
+          </svg>
+        </div>
+        <p id="boardHint" class="board-hint">Tap any square to fix it.</p>
 
         <div class="moves">
           <div class="side-card white" id="whiteCard">
-            <h3><span class="dot w"></span> White's best move</h3>
+            <div class="side-head"><span class="pawn w"></span>White's best</div>
             <div class="best" id="whiteBest">—</div>
             <ol class="alts" id="whiteAlts"></ol>
           </div>
           <div class="side-card black" id="blackCard">
-            <h3><span class="dot b"></span> Black's best move</h3>
+            <div class="side-head"><span class="pawn b"></span>Black's best</div>
             <div class="best" id="blackBest">—</div>
             <ol class="alts" id="blackAlts"></ol>
           </div>
         </div>
-        <p id="engineStatus" class="hint small"></p>
+
+        <div id="scanCard" class="scan-card" hidden>
+          <div class="thumb" id="thumbWrap">
+            <img id="thumb" alt="Your photo" />
+            <svg id="thumbGrid" class="thumb-grid"></svg>
+          </div>
+          <div class="scan-card-body">
+            <div id="scanNote" class="scan-note"></div>
+            <button id="adjustBtn" class="btn small">⤢ Adjust board corners</button>
+          </div>
+        </div>
+
+        <div class="tool-row">
+          <button id="rotateBtn" class="chip">⟳ Rotate</button>
+          <button id="flipBtn" class="chip">⇅ Flip view</button>
+          <button id="moreBtn" class="chip">⚙︎ More</button>
+        </div>
       </section>
     </main>
+
+    <!-- Bottom action bar -->
+    <nav id="bottomBar" class="bottom-bar" hidden>
+      <button id="newScanBtn" class="btn primary grow">📷 New scan</button>
+      <button id="newUploadBtn" class="btn ghost square" aria-label="Upload photo">🖼️</button>
+    </nav>
+
+    <!-- Camera -->
+    <div id="camera" class="screen camera" hidden>
+      <video id="video" playsinline muted autoplay></video>
+      <div class="cam-guide" aria-hidden="true">
+        <div class="cam-frame"><i></i><i></i><i></i><i></i></div>
+      </div>
+      <div class="cam-top">
+        <button id="camClose" class="round-btn" aria-label="Close camera">✕</button>
+        <div class="cam-hint">Fit the board inside the frame</div>
+        <span class="round-spacer"></span>
+      </div>
+      <div class="cam-bottom">
+        <button id="camGallery" class="round-btn" aria-label="Choose from gallery">🖼️</button>
+        <button id="shutter" class="shutter" aria-label="Take photo"></button>
+        <span class="round-spacer"></span>
+      </div>
+    </div>
+
+    <!-- Manual corner adjust -->
+    <div id="adjust" class="screen adjust" hidden>
+      <div class="adjust-top">
+        <button id="adjCancel" class="text-btn">Cancel</button>
+        <div class="adjust-title">Mark the board</div>
+        <button id="adjDone" class="text-btn strong">Read</button>
+      </div>
+      <p id="adjustMsg" class="adjust-msg">Drag the 4 circles onto the corners of the squares.</p>
+      <div class="adjust-stage">
+        <div id="photoWrap" class="photo-wrap">
+          <img id="photo" class="photo" alt="Board photo" />
+          <svg id="overlay" class="overlay"></svg>
+        </div>
+        <div id="loupe" class="loupe" hidden><canvas width="160" height="160"></canvas></div>
+      </div>
+      <div class="adjust-bottom">
+        <button id="adjRead" class="btn primary grow">🔍 Read the board</button>
+      </div>
+    </div>
+
+    <!-- Piece picker -->
+    <div id="sheetBackdrop" class="backdrop" hidden></div>
+    <div id="sheet" class="sheet" hidden role="dialog" aria-label="Choose a piece">
+      <div class="sheet-handle"></div>
+      <div class="sheet-title" id="sheetTitle">Square e4</div>
+      <div id="palette" class="palette"></div>
+    </div>
+
+    <!-- More options -->
+    <div id="moreSheet" class="sheet" hidden role="dialog" aria-label="More options">
+      <div class="sheet-handle"></div>
+      <div class="sheet-title">More options</div>
+      <div class="opt">
+        <span>Engine strength</span>
+        <div class="seg" role="radiogroup">
+          <button class="seg-btn" data-time="1200">Fast</button>
+          <button class="seg-btn active" data-time="3000">Normal</button>
+          <button class="seg-btn" data-time="8000">Deep</button>
+        </div>
+      </div>
+      <div class="opt col">
+        <span>Castling still allowed</span>
+        <div class="checks">
+          <label><input type="checkbox" id="cK" /> White O-O</label>
+          <label><input type="checkbox" id="cQ" /> White O-O-O</label>
+          <label><input type="checkbox" id="ck" /> Black O-O</label>
+          <label><input type="checkbox" id="cq" /> Black O-O-O</label>
+        </div>
+      </div>
+      <div class="opt col">
+        <span>Position (FEN)</span>
+        <div class="row">
+          <input id="fenInput" class="fen" spellcheck="false" autocomplete="off" />
+          <button id="fenLoad" class="btn small">Load</button>
+        </div>
+      </div>
+      <div class="row two">
+        <button id="startBtn" class="btn ghost">Start position</button>
+        <button id="clearBtn" class="btn ghost">Empty board</button>
+      </div>
+    </div>
+
+    <!-- Busy overlay -->
+    <div id="busy" class="busy" hidden>
+      <div class="busy-box"><div class="spinner"></div><div id="busyText">Reading the board…</div></div>
+    </div>
+
+    <div id="toast" class="toast" hidden></div>
+
+    <input id="fileCamera" type="file" accept="image/*" capture="environment" hidden />
+    <input id="fileGallery" type="file" accept="image/*" hidden />
 
     <script type="module" src="/src/main.ts"></script>
   </body>

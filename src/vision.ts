@@ -25,19 +25,42 @@ export interface LoadedImage {
   height: number;
 }
 
-/** Load a photo, honouring EXIF orientation, downscaled so the long edge is at most `maxEdge`. */
-export async function loadImage(file: Blob, maxEdge = 1600): Promise<LoadedImage> {
-  const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" } as ImageBitmapOptions);
-  const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
-  const width = Math.round(bitmap.width * scale);
-  const height = Math.round(bitmap.height * scale);
+/** Draw any image source into a canvas, long edge at most `maxEdge` px. */
+export function fromSource(src: CanvasImageSource, w: number, h: number, maxEdge = 1600): LoadedImage {
+  const scale = Math.min(1, maxEdge / Math.max(w, h));
+  const width = Math.max(1, Math.round(w * scale));
+  const height = Math.max(1, Math.round(h * scale));
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
-  ctx.drawImage(bitmap, 0, 0, width, height);
-  bitmap.close();
-  return { data: ctx.getImageData(0, 0, width, height), url: canvas.toDataURL("image/jpeg", 0.9), width, height };
+  ctx.drawImage(src, 0, 0, width, height);
+  return { data: ctx.getImageData(0, 0, width, height), url: canvas.toDataURL("image/jpeg", 0.85), width, height };
+}
+
+/**
+ * Load a photo file. Uses an <img> element (browsers apply the EXIF rotation of phone
+ * photos to it), which is more widely supported than createImageBitmap options.
+ */
+export async function loadImage(file: Blob, maxEdge = 1600): Promise<LoadedImage> {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    img.src = url;
+    try {
+      await img.decode();
+    } catch {
+      await new Promise<void>((res, rej) => {
+        if (img.complete && img.naturalWidth) return res();
+        img.onload = () => res();
+        img.onerror = () => rej(new Error("This image format isn't supported. Try a JPEG or PNG photo."));
+      });
+    }
+    if (!img.naturalWidth) throw new Error("Couldn't open that image.");
+    return fromSource(img, img.naturalWidth, img.naturalHeight, maxEdge);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 // ---------- geometry ----------

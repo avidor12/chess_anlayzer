@@ -1,5 +1,6 @@
 import "./style.css";
 import "./pieces.css";
+import { detectBoard } from "./detect";
 import { Engine, type SearchResult } from "./engine";
 import {
   START_FEN,
@@ -19,6 +20,7 @@ import {
   apply,
   classifySquares,
   decide,
+  fromSource,
   guessWhiteSide,
   loadImage,
   loadModels,
@@ -26,6 +28,8 @@ import {
   perspective,
   type LoadedImage,
 } from "./vision";
+
+type Pt = [number, number];
 
 // ---------- helpers ----------
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -45,38 +49,57 @@ const store = {
     }
   },
 };
-
+const FILES = "abcdefgh";
+const SVGNS = "http://www.w3.org/2000/svg";
 /** CSS class for a FEN piece char, e.g. "N" -> "wN", "q" -> "bQ". */
 const pieceClass = (p: string) => (p === p.toUpperCase() ? "w" : "b") + p.toUpperCase();
-const FILES = "abcdefgh";
+const PIECE_NAMES: Record<string, string> = { k: "king", q: "queen", r: "rook", b: "bishop", n: "knight", p: "pawn" };
+const nextFrame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+
+function escapeHtml(s: string) {
+  return s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
+}
+
+let toastTimer = 0;
+function toast(msg: string, ms = 2800) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => (t.hidden = true), ms);
+}
+
+function busy(text: string | null) {
+  $("busy").hidden = text === null;
+  if (text) $("busyText").textContent = text;
+}
 
 // ---------- state ----------
 let grid: Grid = placementToGrid(START_FEN.split(" ")[0]);
 let flipped = false;
 let selected: [number, number] | null = null;
 let turn: Side = "w";
-let movetime = 4000;
-let results: Partial<Record<Side, { fen: string; res?: SearchResult; error?: string }>> = {};
-let analysing = false;
-/** Squares the scanner was unsure about (board orientation), shown outlined until edited. */
+let movetime = Number(store.get("movetime")) || 3000;
 let unsure: boolean[][] | null = null;
+let photo: LoadedImage | null = null;
+let corners: Pt[] = [];
 
-const saved = store.get("position");
-if (saved) {
-  try {
-    grid = placementToGrid(saved);
-  } catch {
-    /* ignore */
-  }
-}
+type Entry = { fen: string; res?: SearchResult; error?: string };
+let results: Partial<Record<Side, Entry>> = {};
 
 let engine: Engine | null = null;
 function getEngine() {
-  if (!engine) engine = new Engine(`${import.meta.env.BASE_URL}engine/stockfish-19-lite-single.js`);
+  engine ??= new Engine(`${import.meta.env.BASE_URL}engine/stockfish-19-lite-single.js`);
   return engine;
 }
 
-// ---------- board rendering ----------
+function showResult() {
+  $("home").hidden = true;
+  $("result").hidden = false;
+  $("bottomBar").hidden = false;
+}
+
+// ---------- board ----------
 const boardEl = $("board");
 const arrowsEl = $("arrows") as unknown as SVGSVGElement;
 
@@ -90,8 +113,8 @@ function renderBoard() {
       sq.className = `sq ${(r + c) % 2 === 0 ? "light" : "dark"}`;
       if (selected && selected[0] === r && selected[1] === c) sq.classList.add("sel");
       if (unsure?.[r][c]) sq.classList.add("unsure");
-      sq.setAttribute("aria-label", `${FILES[c]}${8 - r}`);
       const p = grid[r][c];
+      sq.setAttribute("aria-label", `${FILES[c]}${8 - r}${p ? " " + PIECE_NAMES[p.toLowerCase()] : ""}`);
       if (p) {
         const span = document.createElement("span");
         span.className = `pc ${pieceClass(p)}`;
@@ -99,14 +122,20 @@ function renderBoard() {
       }
       if (vc === 0) sq.insertAdjacentHTML("beforeend", `<i class="coord rank">${8 - r}</i>`);
       if (vr === 7) sq.insertAdjacentHTML("beforeend", `<i class="coord file">${FILES[c]}</i>`);
-      sq.addEventListener("click", () => onSquare(r, c));
+      sq.addEventListener("click", () => openPicker(r, c));
       boardEl.appendChild(sq);
     }
   }
   renderArrows();
+  const n = unsure?.flat().filter(Boolean).length ?? 0;
+  const hint = $("boardHint");
+  hint.classList.toggle("warn", n > 0);
+  hint.textContent = n
+    ? `Check the ${n} dashed square${n > 1 ? "s" : ""} — tap any square to fix it.`
+    : "Tap any square to fix it.";
 }
 
-function squareCenter(sq: string): [number, number] {
+function squareCenter(sq: string): Pt {
   const c = FILES.indexOf(sq[0]);
   const r = 8 - Number(sq[1]);
   const vc = flipped ? 7 - c : c;
@@ -116,66 +145,75 @@ function squareCenter(sq: string): [number, number] {
 
 function renderArrows() {
   arrowsEl.querySelectorAll("line").forEach((l) => l.remove());
-  const draw = (uci: string | undefined, color: string, marker: string) => {
+  const draw = (uci: string | undefined, color: string, marker: string, strong: boolean) => {
     if (!uci) return;
     const [x1, y1] = squareCenter(uci.slice(0, 2));
     const [x2, y2] = squareCenter(uci.slice(2, 4));
     const len = Math.hypot(x2 - x1, y2 - y1);
-    const shorten = 28;
-    const ex = x2 - ((x2 - x1) / len) * shorten;
-    const ey = y2 - ((y2 - y1) / len) * shorten;
-    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    const ex = x2 - ((x2 - x1) / len) * 30;
+    const ey = y2 - ((y2 - y1) / len) * 30;
+    const line = document.createElementNS(SVGNS, "line");
     Object.entries({
-      x1,
-      y1,
-      x2: ex,
-      y2: ey,
-      stroke: color,
-      "stroke-width": 16,
+      x1, y1, x2: ex, y2: ey, stroke: color,
+      "stroke-width": strong ? 18 : 13,
       "stroke-linecap": "round",
-      opacity: 0.85,
+      opacity: strong ? 0.9 : 0.55,
       "marker-end": `url(#${marker})`,
     }).forEach(([k, v]) => line.setAttribute(k, String(v)));
     arrowsEl.appendChild(line);
   };
-  draw(results.w?.res?.lines[0]?.pv[0], "#3fa9f5", "headW");
-  draw(results.b?.res?.lines[0]?.pv[0], "#f5793f", "headB");
+  // The side to move gets the bold arrow; draw it last so it is on top.
+  const other: Side = turn === "w" ? "b" : "w";
+  for (const side of [other, turn]) {
+    draw(results[side]?.res?.lines[0]?.pv[0], side === "w" ? "#3fa9f5" : "#f5793f", side === "w" ? "headW" : "headB", side === turn);
+  }
 }
 
-// ---------- editing ----------
-const palette = $("palette");
-function buildPalette() {
-  const pieces = ["K", "Q", "R", "B", "N", "P", "k", "q", "r", "b", "n", "p", ""];
-  palette.innerHTML = "";
+// ---------- piece picker ----------
+function openPicker(r: number, c: number) {
+  selected = [r, c];
+  renderBoard();
+  $("sheetTitle").textContent = `Square ${FILES[c]}${8 - r}`;
+  const pal = $("palette");
+  pal.innerHTML = "";
+  const pieces = ["K", "Q", "R", "B", "N", "P", "k", "q", "r", "b", "n", "p"];
   for (const p of pieces) {
     const b = document.createElement("button");
-    b.className = "pal";
-    if (p) b.innerHTML = `<span class="pc ${pieceClass(p)}"></span>`;
-    else b.textContent = "✕";
-    b.title = p ? p : "Empty";
-    b.addEventListener("click", () => {
-      if (!selected) return;
-      grid[selected[0]][selected[1]] = p;
-      if (unsure) unsure[selected[0]][selected[1]] = false;
-      selected = null;
-      palette.hidden = true;
-      positionChanged(false, true);
-    });
-    palette.appendChild(b);
+    b.className = `pal ${p === p.toLowerCase() ? "dark" : ""}`;
+    b.innerHTML = `<span class="pc ${pieceClass(p)}"></span>`;
+    b.setAttribute("aria-label", `${p === p.toUpperCase() ? "White" : "Black"} ${PIECE_NAMES[p.toLowerCase()]}`);
+    b.addEventListener("click", () => setSquare(p));
+    pal.appendChild(b);
   }
+  const empty = document.createElement("button");
+  empty.className = "pal empty";
+  empty.textContent = "Empty square";
+  empty.addEventListener("click", () => setSquare(""));
+  pal.appendChild(empty);
+  $("sheet").hidden = false;
+  $("sheetBackdrop").hidden = false;
 }
 
-function onSquare(r: number, c: number) {
-  if (selected && selected[0] === r && selected[1] === c) {
+function closeSheets() {
+  $("sheet").hidden = true;
+  $("moreSheet").hidden = true;
+  $("sheetBackdrop").hidden = true;
+  if (selected) {
     selected = null;
-    palette.hidden = true;
-  } else {
-    selected = [r, c];
-    palette.hidden = false;
+    renderBoard();
   }
-  renderBoard();
 }
 
+function setSquare(p: string) {
+  if (!selected) return;
+  const [r, c] = selected;
+  grid[r][c] = p;
+  if (unsure) unsure[r][c] = false;
+  closeSheets();
+  positionChanged(false, true);
+}
+
+// ---------- position ----------
 function castling(): Castling {
   return {
     K: $<HTMLInputElement>("cK").checked,
@@ -195,20 +233,19 @@ function syncCastling(resetToPossible: boolean) {
   }
 }
 
-/** Call after the pieces change. `keepUnsure` keeps the scanner's red outlines. */
+/** Call after the pieces change; re-analyses automatically. */
 function positionChanged(resetCastling: boolean, keepUnsure = false) {
   if (!keepUnsure) unsure = null;
   syncCastling(resetCastling);
-  results = {};
   store.set("position", toFen(grid, "w", castling()).split(" ")[0]);
   $<HTMLInputElement>("fenInput").value = toFen(grid, turn, castling());
   renderBoard();
-  renderResults();
+  analyse();
 }
 
 // ---------- analysis ----------
 function formatScore(cp?: number, mate?: number): string {
-  if (mate !== undefined) return mate === 0 ? "#" : `${mate > 0 ? "" : "-"}M${Math.abs(mate)}`;
+  if (mate !== undefined) return mate === 0 ? "#" : `${mate > 0 ? "+" : "-"}M${Math.abs(mate)}`;
   const v = (cp ?? 0) / 100;
   return `${v > 0 ? "+" : ""}${v.toFixed(1)}`;
 }
@@ -227,37 +264,36 @@ function winPercent(cp?: number, mate?: number) {
 function verdictText(cp?: number, mate?: number): string {
   if (mate !== undefined) {
     if (mate === 0) return "Checkmate";
-    return `${mate > 0 ? "White" : "Black"} has a forced mate in ${Math.abs(mate)}`;
+    return `${mate > 0 ? "White" : "Black"} mates in ${Math.abs(mate)}`;
   }
   const v = cp ?? 0;
   const who = v > 0 ? "White" : "Black";
   const a = Math.abs(v);
-  if (a < 35) return "The position is roughly equal";
+  if (a < 35) return "Equal position";
   if (a < 100) return `${who} is slightly better`;
-  if (a < 250) return `${who} is clearly better`;
-  if (a < 600) return `${who} has a winning advantage`;
+  if (a < 250) return `${who} is better`;
+  if (a < 600) return `${who} is winning`;
   return `${who} is completely winning`;
 }
 
 function renderSide(side: Side) {
   const best = $(side === "w" ? "whiteBest" : "blackBest");
   const alts = $(side === "w" ? "whiteAlts" : "blackAlts");
-  const card = $(side === "w" ? "whiteCard" : "blackCard");
-  const entry = results[side];
+  $(side === "w" ? "whiteCard" : "blackCard").classList.toggle("dim", side !== turn);
   alts.innerHTML = "";
-  card.classList.toggle("dim", side !== turn);
+  const entry = results[side];
   if (!entry) {
-    best.textContent = "—";
+    best.innerHTML = `<span class="placeholder">…</span>`;
     return;
   }
   if (entry.error) {
-    best.innerHTML = `<span class="err">${entry.error}</span>`;
+    best.innerHTML = `<span class="err">${escapeHtml(entry.error)}</span>`;
     return;
   }
   const lines = entry.res?.lines ?? [];
   if (!lines.length) {
     const st = gameStatus(entry.fen);
-    best.textContent = st === "checkmate" ? "Checkmated" : st === "stalemate" ? "Stalemate" : "Thinking…";
+    best.innerHTML = `<span class="placeholder">${st === "checkmate" ? "Checkmated" : st === "stalemate" ? "Stalemate" : "Thinking…"}</span>`;
     return;
   }
   lines.forEach((l, i) => {
@@ -266,8 +302,7 @@ function renderSide(side: Side) {
     const score = formatScore(ws.cp, ws.mate);
     if (i === 0) {
       best.innerHTML = `<span class="mv">${san[0] ?? "?"}</span><span class="score">${score}</span>
-        <div class="line">${san.slice(1).join(" ")}</div>
-        <div class="depth">depth ${l.depth}</div>`;
+        <div class="line">${san.slice(1, 5).join(" ")}</div>`;
     } else {
       const li = document.createElement("li");
       li.innerHTML = `<b>${san[0] ?? "?"}</b> <span class="score">${score}</span>`;
@@ -276,33 +311,29 @@ function renderSide(side: Side) {
   });
 }
 
+function setBar(pct: number, label: string, verdict: string) {
+  $("hbarFill").style.width = `${pct}%`;
+  $("pctW").textContent = `${Math.round(pct)}%`;
+  $("pctB").textContent = `${Math.round(100 - pct)}%`;
+  $("evalNum").textContent = label;
+  $("verdict").textContent = verdict;
+}
+
 function renderEval() {
   const entry = results[turn];
-  const fill = $("evalFill");
-  const label = $("evalLabel");
-  const verdict = $("verdict");
   const top = entry?.res?.lines[0];
-  if (!top) {
-    fill.style.height = "50%";
-    label.textContent = "0.0";
-    const st = entry && !entry.error ? gameStatus(entry.fen) : null;
-    if (st) {
-      verdict.hidden = false;
-      verdict.textContent =
-        st === "checkmate" ? `Checkmate — ${turn === "w" ? "Black" : "White"} wins` : "Stalemate — draw";
-      fill.style.height = st === "checkmate" ? (turn === "w" ? "0%" : "100%") : "50%";
-    } else {
-      verdict.hidden = true;
-    }
+  if (top) {
+    const ws = whiteScore(turn, top.cp, top.mate);
+    setBar(winPercent(ws.cp, ws.mate), formatScore(ws.cp, ws.mate), verdictText(ws.cp, ws.mate));
     return;
   }
-  const ws = whiteScore(turn, top.cp, top.mate);
-  const pct = winPercent(ws.cp, ws.mate);
-  fill.style.height = `${pct}%`;
-  label.textContent = formatScore(ws.cp, ws.mate);
-  label.classList.toggle("on-white", pct >= 50);
-  verdict.hidden = false;
-  verdict.innerHTML = `<b>${verdictText(ws.cp, ws.mate)}</b><span>${Math.round(pct)}% White · ${Math.round(100 - pct)}% Black</span>`;
+  if (entry && !entry.error) {
+    const st = gameStatus(entry.fen);
+    if (st === "checkmate") return setBar(turn === "w" ? 0 : 100, "#", `Checkmate — ${turn === "w" ? "Black" : "White"} wins`);
+    if (st === "stalemate") return setBar(50, "½", "Stalemate — draw");
+  }
+  if (entry?.error) return setBar(50, "–", "Not a legal position");
+  setBar(50, "…", "Analyzing…");
 }
 
 function renderResults() {
@@ -312,121 +343,129 @@ function renderResults() {
   renderArrows();
 }
 
+let analysisToken = 0;
 async function analyse() {
-  if (analysing) return;
-  selected = null;
-  palette.hidden = true;
-  analysing = true;
-  const btn = $<HTMLButtonElement>("analyzeBtn");
-  btn.disabled = true;
-  btn.textContent = "Analyzing…";
-  const status = $("engineStatus");
+  const token = ++analysisToken;
+  const eng = getEngine();
+  eng.stop();
+  const c = castling();
   results = {};
+  for (const side of ["w", "b"] as Side[]) {
+    const fen = toFen(grid, side, c);
+    const err = checkPosition(grid, side, c);
+    results[side] = err ? { fen, error: err } : { fen };
+  }
+  // If only one side can be to move (the other king is in check), switch to it.
+  const other: Side = turn === "w" ? "b" : "w";
+  if (results[turn]?.error && !results[other]?.error) {
+    setTurn(other);
+    toast(`${other === "w" ? "White" : "Black"} to move — the other king is in check.`);
+  }
+  const order: Side[] = turn === "w" ? ["w", "b"] : ["b", "w"];
+  renderResults();
+  $("thinking").hidden = false;
   try {
-    const eng = getEngine();
-    status.textContent = "Loading engine…";
     await eng.whenReady();
-    // Analyse the side whose turn it is first, then the other.
-    const order: Side[] = turn === "w" ? ["w", "b"] : ["b", "w"];
-    const c = castling();
     for (const side of order) {
-      const fen = toFen(grid, side, c);
-      const err = checkPosition(grid, side, c);
-      results[side] = err ? { fen, error: err } : { fen };
-    }
-    renderResults();
-    for (const side of order) {
+      if (token !== analysisToken) return;
       const entry = results[side]!;
       if (entry.error || gameStatus(entry.fen)) continue;
-      status.textContent = `Stockfish is thinking about ${side === "w" ? "White" : "Black"}'s move…`;
-      entry.res = await eng.analyse(entry.fen, movetime, (r) => {
+      const res = await eng.analyse(entry.fen, movetime, (r) => {
+        if (token !== analysisToken) return;
         entry.res = r;
         renderResults();
       });
+      if (token !== analysisToken) return;
+      entry.res = res;
       renderResults();
     }
-    status.textContent = "Engine: Stockfish 19 (running on your device).";
   } catch (e) {
-    status.textContent = `Engine error: ${(e as Error).message}`;
+    toast(`Engine error: ${(e as Error).message}`);
   } finally {
-    analysing = false;
-    btn.disabled = false;
-    btn.textContent = "♟ Analyze position";
+    if (token === analysisToken) $("thinking").hidden = true;
   }
 }
 
-// ---------- scanning ----------
-function showScanStatus(html: string, kind: "info" | "error" | "ok" = "info") {
-  const el = $("scanStatus");
-  el.hidden = false;
-  el.className = `status ${kind}`;
-  el.innerHTML = html;
+function setTurn(t: Side) {
+  if (t === turn) return;
+  turn = t;
+  document.querySelectorAll<HTMLButtonElement>("[data-turn]").forEach((b) => b.classList.toggle("active", b.dataset.turn === t));
+  $<HTMLInputElement>("fenInput").value = toFen(grid, turn, castling());
+  renderResults();
 }
 
-type Pt = [number, number];
-let photo: LoadedImage | null = null;
-let corners: Pt[] = [];
-const overlay = $("overlay") as unknown as SVGSVGElement;
-const SVGNS = "http://www.w3.org/2000/svg";
-
-async function onPhoto(file: File | undefined) {
-  if (!file) return;
-  try {
-    photo = await loadImage(file);
-  } catch {
-    showScanStatus("Couldn't open that image.", "error");
+// ---------- scanning pipeline ----------
+async function processPhoto(img: LoadedImage) {
+  photo = img;
+  busy("Finding the board…");
+  await nextFrame();
+  const found = detectBoard(img.data);
+  if (!found) {
+    busy(null);
+    corners = defaultCorners();
+    openAdjust("I couldn't find the board by myself. Drag the 4 circles onto its corners.", true);
     return;
   }
-  const { width: W, height: H } = photo;
-  // Start from the corners used last time (same setup is common), else a centred square.
-  let saved: Pt[] | null = null;
-  try {
-    saved = JSON.parse(store.get("corners") ?? "null");
-  } catch {
-    /* ignore */
-  }
-  if (saved?.length === 4) corners = saved.map(([x, y]) => [x * W, y * H] as Pt);
-  else {
-    const s = Math.min(W, H) * 0.7;
-    const x0 = (W - s) / 2,
-      y0 = (H - s) / 2;
-    corners = [
-      [x0, y0],
-      [x0 + s, y0],
-      [x0 + s, y0 + s],
-      [x0, y0 + s],
-    ];
-  }
-  $<HTMLImageElement>("preview").src = photo.url;
-  overlay.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  $("cornerStep").hidden = false;
-  $("scanStatus").hidden = true;
-  drawOverlay();
-  $("cornerStep").scrollIntoView({ behavior: "smooth", block: "start" });
-  loadModels().catch(() => undefined); // warm up while the user aligns the corners
+  corners = found.corners;
+  await readBoard(found.score < 0.5);
 }
 
-function drawOverlay() {
+async function readBoard(lowConfidence = false) {
   if (!photo) return;
-  overlay.innerHTML = "";
+  busy("Reading the pieces…");
+  await nextFrame();
+  try {
+    const guesses = await classifySquares(photo.data, corners);
+    const reading = decide(guesses, guessWhiteSide(guesses));
+    grid = reading.grid;
+    unsure = reading.uncertain;
+    flipped = false;
+    closeAdjust();
+    showResult();
+    renderThumb();
+    const n = unsure.flat().filter(Boolean).length;
+    const pieces = grid.flat().filter(Boolean).length;
+    $("scanNote").innerHTML =
+      `Found <b>${pieces}</b> piece${pieces === 1 ? "" : "s"}.` +
+      (lowConfidence ? " The board outline may be off." : "") +
+      (n ? ` <b>${n}</b> square${n > 1 ? "s" : ""} to check.` : "");
+    positionChanged(true, true);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    if (pieces === 0) toast("No pieces found — is the board outline right?");
+  } catch (e) {
+    toast(`Couldn't read the board: ${(e as Error).message}`, 5000);
+  } finally {
+    busy(null);
+  }
+}
+
+function defaultCorners(): Pt[] {
+  const { width: W, height: H } = photo!;
+  const s = Math.min(W, H) * 0.8;
+  const x0 = (W - s) / 2,
+    y0 = (H - s) / 2;
+  return [
+    [x0, y0],
+    [x0 + s, y0],
+    [x0 + s, y0 + s],
+    [x0, y0 + s],
+  ];
+}
+
+/** Draw the 8x8 grid for the given corners into an SVG sized to the photo. */
+function drawGrid(svg: SVGSVGElement, withHandles: boolean) {
+  if (!photo) return;
+  svg.setAttribute("viewBox", `0 0 ${photo.width} ${photo.height}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.innerHTML = "";
   const size = Math.max(photo.width, photo.height);
-  const ordered = orderCorners(corners);
-  const Hm = perspective(
-    [
-      [0, 0],
-      [1, 0],
-      [1, 1],
-      [0, 1],
-    ],
-    ordered,
-  );
+  const Hm = perspective([[0, 0], [1, 0], [1, 1], [0, 1]], orderCorners(corners));
   const mk = (tag: string, attrs: Record<string, string | number>) => {
     const el = document.createElementNS(SVGNS, tag);
     for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
-    overlay.appendChild(el);
-    return el;
+    svg.appendChild(el);
   };
-  const sw = size * 0.003;
+  const sw = size * (withHandles ? 0.0025 : 0.005);
   for (let i = 0; i <= 8; i++) {
     const t = i / 8;
     const outer = i === 0 || i === 8;
@@ -435,22 +474,43 @@ function drawOverlay() {
       [apply(Hm, 0, t), apply(Hm, 1, t)],
     ])
       mk("line", {
-        x1: a[0],
-        y1: a[1],
-        x2: b[0],
-        y2: b[1],
-        stroke: outer ? "#6cc04a" : "rgba(108,192,74,.75)",
+        x1: a[0], y1: a[1], x2: b[0], y2: b[1],
+        stroke: outer ? "#7bd35a" : "rgba(123,211,90,.7)",
         "stroke-width": outer ? sw * 2 : sw,
       });
   }
-  // Mark the side nearest the camera (bottom of the photo) is where the model expects to look from.
-  corners.forEach(([x, y]) => {
-    mk("circle", { cx: x, cy: y, r: size * 0.035, fill: "rgba(108,192,74,.25)", stroke: "#6cc04a", "stroke-width": sw * 2 });
-    mk("circle", { cx: x, cy: y, r: size * 0.005, fill: "#fff" });
-  });
+  if (withHandles)
+    corners.forEach(([x, y]) => {
+      mk("circle", { cx: x, cy: y, r: size * 0.04, fill: "rgba(123,211,90,.22)", stroke: "#7bd35a", "stroke-width": sw * 2.5 });
+      mk("circle", { cx: x, cy: y, r: size * 0.006, fill: "#fff" });
+    });
 }
 
-// Dragging the corner handles (with a magnifier so the finger doesn't hide the corner).
+function renderThumb() {
+  if (!photo) return;
+  $("scanCard").hidden = false;
+  $<HTMLImageElement>("thumb").src = photo.url;
+  drawGrid($("thumbGrid") as unknown as SVGSVGElement, false);
+}
+
+// ---------- adjust screen ----------
+const overlay = $("overlay") as unknown as SVGSVGElement;
+
+function openAdjust(msg?: string, warn = false) {
+  if (!photo) return;
+  $<HTMLImageElement>("photo").src = photo.url;
+  const m = $("adjustMsg");
+  m.textContent = msg ?? "Drag the 4 circles onto the corners of the squares (not the outer frame).";
+  m.classList.toggle("warn", warn);
+  $("adjust").hidden = false;
+  drawGrid(overlay, true);
+  loadModels().catch(() => undefined);
+}
+function closeAdjust() {
+  $("adjust").hidden = true;
+  $("loupe").hidden = true;
+}
+
 let drag: { i: number; dx: number; dy: number } | null = null;
 const loupe = $("loupe");
 const loupeCtx = loupe.querySelector("canvas")!.getContext("2d")!;
@@ -461,33 +521,31 @@ function toImage(e: PointerEvent): Pt {
 }
 
 function showLoupe(p: Pt) {
-  const img = $<HTMLImageElement>("preview");
-  const zoom = 70 * (photo!.width / overlay.getBoundingClientRect().width) * 0.5;
+  const img = $<HTMLImageElement>("photo");
+  const shown = overlay.getBoundingClientRect().width;
+  const span = (60 * photo!.width) / shown; // image px visible in the loupe (~2.7x zoom)
   loupeCtx.fillStyle = "#000";
-  loupeCtx.fillRect(0, 0, 140, 140);
-  loupeCtx.drawImage(img, p[0] - zoom / 2, p[1] - zoom / 2, zoom, zoom, 0, 0, 140, 140);
-  loupeCtx.strokeStyle = "#6cc04a";
-  loupeCtx.lineWidth = 1.5;
+  loupeCtx.fillRect(0, 0, 160, 160);
+  loupeCtx.drawImage(img, p[0] - span / 2, p[1] - span / 2, span, span, 0, 0, 160, 160);
+  loupeCtx.strokeStyle = "#7bd35a";
+  loupeCtx.lineWidth = 2;
   loupeCtx.beginPath();
-  loupeCtx.moveTo(70, 50);
-  loupeCtx.lineTo(70, 90);
-  loupeCtx.moveTo(50, 70);
-  loupeCtx.lineTo(90, 70);
+  loupeCtx.moveTo(80, 58);
+  loupeCtx.lineTo(80, 102);
+  loupeCtx.moveTo(58, 80);
+  loupeCtx.lineTo(102, 80);
   loupeCtx.stroke();
   loupe.hidden = false;
-  // Put the loupe in the corner away from the finger.
-  const r = overlay.getBoundingClientRect();
-  const left = p[0] / photo!.width < 0.5;
-  loupe.style.left = left ? "" : "8px";
-  loupe.style.right = left ? "8px" : "";
-  loupe.style.top = `${$("photoWrap").offsetTop + 8 + (p[1] / photo!.height < 0.3 ? r.height - 156 : 0)}px`;
+  const onLeft = p[0] / photo!.width < 0.5;
+  loupe.classList.toggle("right", onLeft);
+  loupe.classList.toggle("left", !onLeft);
 }
 
 overlay.addEventListener("pointerdown", (e) => {
   if (!photo) return;
   const p = toImage(e);
   let best = -1,
-    bestD = Math.max(photo.width, photo.height) * 0.15;
+    bestD = Math.max(photo.width, photo.height) * 0.18;
   corners.forEach(([x, y], i) => {
     const d = Math.hypot(x - p[0], y - p[1]);
     if (d < bestD) {
@@ -507,7 +565,7 @@ overlay.addEventListener("pointermove", (e) => {
   const x = Math.min(photo.width, Math.max(0, p[0] + drag.dx));
   const y = Math.min(photo.height, Math.max(0, p[1] + drag.dy));
   corners[drag.i] = [x, y];
-  drawOverlay();
+  drawGrid(overlay, true);
   showLoupe([x, y]);
 });
 const endDrag = () => {
@@ -517,103 +575,158 @@ const endDrag = () => {
 overlay.addEventListener("pointerup", endDrag);
 overlay.addEventListener("pointercancel", endDrag);
 
-async function readBoard() {
-  if (!photo) return;
-  const btn = $<HTMLButtonElement>("readBtn");
-  btn.disabled = true;
-  showScanStatus(`<span class="spinner"></span> Reading the board…`);
+// ---------- camera ----------
+let stream: MediaStream | null = null;
+const video = $<HTMLVideoElement>("video");
+
+async function openCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    $("fileCamera").click();
+    return;
+  }
   try {
-    store.set("corners", JSON.stringify(corners.map(([x, y]) => [x / photo!.width, y / photo!.height])));
-    const guesses = await classifySquares(photo.data, corners);
-    const reading = decide(guesses, guessWhiteSide(guesses));
-    grid = reading.grid;
-    unsure = reading.uncertain;
-    flipped = false;
-    positionChanged(true, true);
-    const nUnsure = unsure.flat().filter(Boolean).length;
-    const warn = checkPosition(grid, "w", castling()) && checkPosition(grid, "b", castling());
-    showScanStatus(
-      `✓ Board read. Compare it with your board and tap any wrong square to fix it.` +
-        (nUnsure ? ` <b>${nUnsure}</b> square${nUnsure > 1 ? "s" : ""} marked in red need a check.` : "") +
-        ` If the pieces look turned, use <b>Rotate pieces 90°</b>.` +
-        (warn ? `<br><b>Check:</b> ${escapeHtml(warn)}` : ""),
-      warn ? "error" : "ok",
-    );
-    $("positionCard").scrollIntoView({ behavior: "smooth", block: "start" });
-    if (!warn) analyse();
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1920 } },
+      audio: false,
+    });
+  } catch {
+    // Permission denied or no camera: use the phone's own camera app instead.
+    $("fileCamera").click();
+    return;
+  }
+  video.srcObject = stream;
+  $("camera").hidden = false;
+  await video.play().catch(() => undefined);
+  loadModels().catch(() => undefined); // warm up while the user frames the board
+  getEngine();
+}
+
+function closeCamera() {
+  stream?.getTracks().forEach((t) => t.stop());
+  stream = null;
+  video.srcObject = null;
+  $("camera").hidden = true;
+}
+
+async function capture() {
+  const w = video.videoWidth,
+    h = video.videoHeight;
+  if (!w || !h) return;
+  const img = fromSource(video, w, h);
+  closeCamera();
+  await processPhoto(img);
+}
+
+async function onFile(file: File | undefined) {
+  if (!file) return;
+  busy("Opening photo…");
+  try {
+    const img = await loadImage(file);
+    await processPhoto(img);
   } catch (e) {
-    showScanStatus(`Couldn't read the board: ${escapeHtml((e as Error).message)}`, "error");
-  } finally {
-    btn.disabled = false;
+    busy(null);
+    toast((e as Error).message || "Couldn't open that image.", 4000);
   }
 }
 
-function escapeHtml(s: string) {
-  return s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
-}
-
 // ---------- wiring ----------
-$<HTMLInputElement>("cameraInput").addEventListener("change", (e) => {
-  const input = e.target as HTMLInputElement;
-  onPhoto(input.files?.[0]);
-  input.value = "";
+$("scanBtn").addEventListener("click", openCamera);
+$("newScanBtn").addEventListener("click", openCamera);
+$("uploadBtn").addEventListener("click", () => $("fileGallery").click());
+$("newUploadBtn").addEventListener("click", () => $("fileGallery").click());
+$("camGallery").addEventListener("click", () => {
+  closeCamera();
+  $("fileGallery").click();
 });
-$<HTMLInputElement>("galleryInput").addEventListener("change", (e) => {
-  const input = e.target as HTMLInputElement;
-  onPhoto(input.files?.[0]);
-  input.value = "";
+$("camClose").addEventListener("click", closeCamera);
+$("shutter").addEventListener("click", capture);
+for (const id of ["fileCamera", "fileGallery"]) {
+  $<HTMLInputElement>(id).addEventListener("change", (e) => {
+    const input = e.target as HTMLInputElement;
+    const f = input.files?.[0];
+    input.value = "";
+    onFile(f);
+  });
+}
+$("manualBtn").addEventListener("click", () => {
+  showResult();
+  positionChanged(true);
+  toast("Tap squares to place pieces, or use ⚙︎ More → Empty board.");
 });
-$("readBtn").addEventListener("click", readBoard);
+
+$("adjCancel").addEventListener("click", closeAdjust);
+$("adjDone").addEventListener("click", () => readBoard());
+$("adjRead").addEventListener("click", () => readBoard());
+$("adjustBtn").addEventListener("click", () => openAdjust());
+$("thumbWrap").addEventListener("click", () => openAdjust());
+
 $("flipBtn").addEventListener("click", () => {
   flipped = !flipped;
   renderBoard();
 });
 $("rotateBtn").addEventListener("click", () => {
   grid = rotateGrid(grid);
-  positionChanged(true);
+  if (unsure) unsure = rotateGrid(unsure.map((r) => r.map((v) => (v ? "x" : "")))).map((r) => r.map((v) => v === "x"));
+  positionChanged(true, true);
 });
+$("moreBtn").addEventListener("click", () => {
+  $("moreSheet").hidden = false;
+  $("sheetBackdrop").hidden = false;
+});
+$("sheetBackdrop").addEventListener("click", closeSheets);
 $("startBtn").addEventListener("click", () => {
   grid = placementToGrid(START_FEN.split(" ")[0]);
+  closeSheets();
   positionChanged(true);
 });
 $("clearBtn").addEventListener("click", () => {
   grid = emptyGrid();
+  closeSheets();
   positionChanged(true);
 });
-for (const k of ["K", "Q", "k", "q"]) {
-  $(`c${k}`).addEventListener("change", () => {
-    results = {};
-    $<HTMLInputElement>("fenInput").value = toFen(grid, turn, castling());
-    renderResults();
-  });
-}
+for (const k of ["K", "Q", "k", "q"]) $(`c${k}`).addEventListener("change", () => positionChanged(false, true));
 $("fenLoad").addEventListener("click", () => {
   const fen = $<HTMLInputElement>("fenInput").value.trim();
   const [placement, side, cs = "-"] = fen.split(/\s+/);
-  if (!placement || placement.split("/").length !== 8) return;
+  if (!placement || placement.split("/").length !== 8) return toast("That doesn't look like a FEN.");
   grid = placementToGrid(placement);
   if (side === "w" || side === "b") setTurn(side);
   syncCastling(false);
   for (const k of ["K", "Q", "k", "q"]) $<HTMLInputElement>(`c${k}`).checked = cs.includes(k);
+  closeSheets();
   positionChanged(false);
 });
-
-function setTurn(t: Side) {
-  turn = t;
-  document.querySelectorAll<HTMLButtonElement>("[data-turn]").forEach((b) => b.classList.toggle("active", b.dataset.turn === t));
-  $<HTMLInputElement>("fenInput").value = toFen(grid, turn, castling());
-  renderResults();
-}
 document.querySelectorAll<HTMLButtonElement>("[data-turn]").forEach((b) =>
   b.addEventListener("click", () => setTurn(b.dataset.turn as Side)),
 );
-document.querySelectorAll<HTMLButtonElement>("[data-time]").forEach((b) =>
+document.querySelectorAll<HTMLButtonElement>("[data-time]").forEach((b) => {
+  b.classList.toggle("active", Number(b.dataset.time) === movetime);
   b.addEventListener("click", () => {
     movetime = Number(b.dataset.time);
+    store.set("movetime", String(movetime));
     document.querySelectorAll<HTMLButtonElement>("[data-time]").forEach((x) => x.classList.toggle("active", x === b));
-  }),
-);
-$("analyzeBtn").addEventListener("click", analyse);
+    analyse();
+  });
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    closeSheets();
+    if (!$("camera").hidden) closeCamera();
+  }
+});
 
-buildPalette();
-positionChanged(true);
+// Restore the last position so reopening the app shows where you left off.
+const saved = store.get("position");
+if (saved) {
+  try {
+    grid = placementToGrid(saved);
+  } catch {
+    /* ignore */
+  }
+}
+syncCastling(true);
+renderBoard();
+
+if ("serviceWorker" in navigator && import.meta.env.PROD) {
+  navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => undefined);
+}

@@ -11,10 +11,12 @@ Everything runs **on your phone**. There's no account, no API key, and no server
 
 ## How it works
 
-1. **Scan**: take a photo of the board from a player's side, then drag the 4 green circles onto the corners of the 64 squares. A magnifier helps you place them exactly. The app remembers the corners for your next scan.
-2. **Read**: two small neural networks (MobileNetV3, about 6 MB each, run with onnxruntime-web) decide for each square whether it's empty and which piece is on it. The app works out which side White is on, applies basic chess rules (one king each, no pawns on the back ranks), and outlines in red any square it's unsure about.
-3. **Check**: fix any mistake by tapping a square and picking a piece. You can also rotate, flip, reset, clear, set castling rights, or paste a FEN.
-4. **Analyze**: Stockfish 19 (WebAssembly) finds the best move with White to move and with Black to move. Choose whose turn it really is, and the eval bar shows the score from that side's point of view.
+1. **Scan**: tap *Scan a board*. The camera opens inside the app; frame the board and press the shutter. You can also upload a photo instead.
+2. **Find the board**: the app finds the 8×8 grid in the photo by itself (edge detection → line fitting → a perspective lattice fit). If it can't, it asks you to drag 4 corners, with a magnifier to help.
+3. **Read the pieces**: two small neural networks (MobileNetV3, about 6 MB each, run with onnxruntime-web) decide for each square whether it's empty and which piece is on it. The app works out which side White is on, applies basic chess rules, and marks with a dashed outline any square it's unsure about.
+4. **Analyze**: Stockfish 19 (WebAssembly) finds the best move for both sides right away, and the bar shows who's ahead. If only one side can legally be to move, the app picks that side for you. Tap any square to fix a piece, and the analysis updates.
+
+After the first visit it works offline (a service worker keeps a copy of the app, the engine and the models).
 
 Recognition works best on standard tournament-style (Staunton) pieces with even light. Unusual or decorative sets may need a few squares corrected.
 
