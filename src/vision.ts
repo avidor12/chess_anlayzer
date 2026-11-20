@@ -209,10 +209,16 @@ function buildInputs(img: ImageData, corners: Point[]) {
 
 // ---------- models ----------
 
-let sessions: Promise<[ort.InferenceSession, ort.InferenceSession]> | null = null;
+type Sessions = [ort.InferenceSession, ort.InferenceSession, ort.InferenceSession];
+let sessions: Promise<Sessions> | null = null;
+/**
+ * Empty/occupied is decided by two models averaged: one trained for this app on real
+ * photos (most accurate) and a small one trained on very varied data (most robust).
+ */
 export function loadModels() {
   sessions ??= Promise.all([
-    ort.InferenceSession.create(`${BASE}models/board_photo_occupancy.onnx`),
+    ort.InferenceSession.create(`${BASE}models/occupancy.onnx`),
+    ort.InferenceSession.create(`${BASE}models/occupancy_small.onnx`),
     ort.InferenceSession.create(`${BASE}models/pieces.onnx`),
   ]).catch((e) => {
     sessions = null;
@@ -239,18 +245,20 @@ export interface SquareGuess {
 
 /** Classify all 64 squares. Result is in photo orientation: [row][col] as seen in the photo. */
 export async function classifySquares(img: ImageData, corners: Point[]): Promise<SquareGuess[][]> {
-  const [occS, pcsS] = await loadModels();
+  const [occS, occSmallS, pcsS] = await loadModels();
   const { occ, pcs } = buildInputs(img, corners);
-  const occOut = await occS.run({ input: new ort.Tensor("float32", occ, [64, 3, 100, 100]) });
+  const occIn = { input: new ort.Tensor("float32", occ, [64, 3, 100, 100]) };
+  const lo = (await occS.run(occIn)).logits.data as Float32Array;
+  const lo2 = (await occSmallS.run(occIn)).logits.data as Float32Array;
   const pcsOut = await pcsS.run({ input: new ort.Tensor("float32", pcs, [64, 3, 200, 100]) });
-  const lo = occOut.logits.data as Float32Array;
   const lp = pcsOut.logits.data as Float32Array;
   const out: SquareGuess[][] = [];
   for (let r = 0; r < 8; r++) {
     const row: SquareGuess[] = [];
     for (let c = 0; c < 8; c++) {
       const i = r * 8 + c;
-      row.push({ occupied: softmax(lo, 2, i)[1], pieces: softmax(lp, 12, i) });
+      const occupied = (softmax(lo, 2, i)[1] + softmax(lo2, 2, i)[1]) / 2;
+      row.push({ occupied, pieces: softmax(lp, 12, i) });
     }
     out.push(row);
   }

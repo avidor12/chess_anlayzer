@@ -1,5 +1,5 @@
 // Offline support: keep a copy of the app, engine and models after the first visit.
-const CACHE = "chess-scanner-v3";
+const CACHE = "chess-scanner-v5";
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) =>
   e.waitUntil(
