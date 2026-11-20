@@ -6,7 +6,6 @@ import {
   checkPosition,
   emptyGrid,
   gameStatus,
-  photoGridToBoard,
   placementToGrid,
   possibleCastling,
   pvToSan,
@@ -16,8 +15,17 @@ import {
   type Grid,
   type Side,
 } from "./position";
-// The vision module (Anthropic SDK) is loaded on demand to keep startup fast.
-const vision = () => import("./vision");
+import {
+  apply,
+  classifySquares,
+  decide,
+  guessWhiteSide,
+  loadImage,
+  loadModels,
+  orderCorners,
+  perspective,
+  type LoadedImage,
+} from "./vision";
 
 // ---------- helpers ----------
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -50,8 +58,8 @@ let turn: Side = "w";
 let movetime = 4000;
 let results: Partial<Record<Side, { fen: string; res?: SearchResult; error?: string }>> = {};
 let analysing = false;
-let lastImage: Awaited<ReturnType<Awaited<ReturnType<typeof vision>>["prepareImage"]>> | null = null;
-let recognizeAbort: AbortController | null = null;
+/** Squares the scanner was unsure about (board orientation), shown outlined until edited. */
+let unsure: boolean[][] | null = null;
 
 const saved = store.get("position");
 if (saved) {
@@ -81,6 +89,7 @@ function renderBoard() {
       const sq = document.createElement("button");
       sq.className = `sq ${(r + c) % 2 === 0 ? "light" : "dark"}`;
       if (selected && selected[0] === r && selected[1] === c) sq.classList.add("sel");
+      if (unsure?.[r][c]) sq.classList.add("unsure");
       sq.setAttribute("aria-label", `${FILES[c]}${8 - r}`);
       const p = grid[r][c];
       if (p) {
@@ -147,9 +156,10 @@ function buildPalette() {
     b.addEventListener("click", () => {
       if (!selected) return;
       grid[selected[0]][selected[1]] = p;
+      if (unsure) unsure[selected[0]][selected[1]] = false;
       selected = null;
       palette.hidden = true;
-      positionChanged(false);
+      positionChanged(false, true);
     });
     palette.appendChild(b);
   }
@@ -185,7 +195,9 @@ function syncCastling(resetToPossible: boolean) {
   }
 }
 
-function positionChanged(resetCastling: boolean) {
+/** Call after the pieces change. `keepUnsure` keeps the scanner's red outlines. */
+function positionChanged(resetCastling: boolean, keepUnsure = false) {
+  if (!keepUnsure) unsure = null;
   syncCastling(resetCastling);
   results = {};
   store.set("position", toFen(grid, "w", castling()).split(" ")[0]);
@@ -351,53 +363,188 @@ function showScanStatus(html: string, kind: "info" | "error" | "ok" = "info") {
   el.innerHTML = html;
 }
 
+type Pt = [number, number];
+let photo: LoadedImage | null = null;
+let corners: Pt[] = [];
+const overlay = $("overlay") as unknown as SVGSVGElement;
+const SVGNS = "http://www.w3.org/2000/svg";
+
 async function onPhoto(file: File | undefined) {
   if (!file) return;
   try {
-    lastImage = await (await vision()).prepareImage(file);
+    photo = await loadImage(file);
   } catch {
     showScanStatus("Couldn't open that image.", "error");
     return;
   }
-  const img = $<HTMLImageElement>("preview");
-  img.src = lastImage.url;
-  img.hidden = false;
-  await recognize();
+  const { width: W, height: H } = photo;
+  // Start from the corners used last time (same setup is common), else a centred square.
+  let saved: Pt[] | null = null;
+  try {
+    saved = JSON.parse(store.get("corners") ?? "null");
+  } catch {
+    /* ignore */
+  }
+  if (saved?.length === 4) corners = saved.map(([x, y]) => [x * W, y * H] as Pt);
+  else {
+    const s = Math.min(W, H) * 0.7;
+    const x0 = (W - s) / 2,
+      y0 = (H - s) / 2;
+    corners = [
+      [x0, y0],
+      [x0 + s, y0],
+      [x0 + s, y0 + s],
+      [x0, y0 + s],
+    ];
+  }
+  $<HTMLImageElement>("preview").src = photo.url;
+  overlay.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  $("cornerStep").hidden = false;
+  $("scanStatus").hidden = true;
+  drawOverlay();
+  $("cornerStep").scrollIntoView({ behavior: "smooth", block: "start" });
+  loadModels().catch(() => undefined); // warm up while the user aligns the corners
 }
 
-async function recognize() {
-  if (!lastImage) return;
-  const apiKey = store.get("apiKey");
-  if (!apiKey) {
-    showScanStatus("Add your Anthropic API key in ⚙︎ Settings to recognize the board automatically — or set up the pieces by hand below.", "error");
-    openSettings();
-    return;
+function drawOverlay() {
+  if (!photo) return;
+  overlay.innerHTML = "";
+  const size = Math.max(photo.width, photo.height);
+  const ordered = orderCorners(corners);
+  const Hm = perspective(
+    [
+      [0, 0],
+      [1, 0],
+      [1, 1],
+      [0, 1],
+    ],
+    ordered,
+  );
+  const mk = (tag: string, attrs: Record<string, string | number>) => {
+    const el = document.createElementNS(SVGNS, tag);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
+    overlay.appendChild(el);
+    return el;
+  };
+  const sw = size * 0.003;
+  for (let i = 0; i <= 8; i++) {
+    const t = i / 8;
+    const outer = i === 0 || i === 8;
+    for (const [a, b] of [
+      [apply(Hm, t, 0), apply(Hm, t, 1)],
+      [apply(Hm, 0, t), apply(Hm, 1, t)],
+    ])
+      mk("line", {
+        x1: a[0],
+        y1: a[1],
+        x2: b[0],
+        y2: b[1],
+        stroke: outer ? "#6cc04a" : "rgba(108,192,74,.75)",
+        "stroke-width": outer ? sw * 2 : sw,
+      });
   }
-  recognizeAbort?.abort();
-  recognizeAbort = new AbortController();
-  $("rescanBtn").hidden = true;
-  showScanStatus(`<span class="spinner"></span> Reading the board… this can take up to a minute.`);
+  // Mark the side nearest the camera (bottom of the photo) is where the model expects to look from.
+  corners.forEach(([x, y]) => {
+    mk("circle", { cx: x, cy: y, r: size * 0.035, fill: "rgba(108,192,74,.25)", stroke: "#6cc04a", "stroke-width": sw * 2 });
+    mk("circle", { cx: x, cy: y, r: size * 0.005, fill: "#fff" });
+  });
+}
+
+// Dragging the corner handles (with a magnifier so the finger doesn't hide the corner).
+let drag: { i: number; dx: number; dy: number } | null = null;
+const loupe = $("loupe");
+const loupeCtx = loupe.querySelector("canvas")!.getContext("2d")!;
+
+function toImage(e: PointerEvent): Pt {
+  const r = overlay.getBoundingClientRect();
+  return [((e.clientX - r.left) / r.width) * photo!.width, ((e.clientY - r.top) / r.height) * photo!.height];
+}
+
+function showLoupe(p: Pt) {
+  const img = $<HTMLImageElement>("preview");
+  const zoom = 70 * (photo!.width / overlay.getBoundingClientRect().width) * 0.5;
+  loupeCtx.fillStyle = "#000";
+  loupeCtx.fillRect(0, 0, 140, 140);
+  loupeCtx.drawImage(img, p[0] - zoom / 2, p[1] - zoom / 2, zoom, zoom, 0, 0, 140, 140);
+  loupeCtx.strokeStyle = "#6cc04a";
+  loupeCtx.lineWidth = 1.5;
+  loupeCtx.beginPath();
+  loupeCtx.moveTo(70, 50);
+  loupeCtx.lineTo(70, 90);
+  loupeCtx.moveTo(50, 70);
+  loupeCtx.lineTo(90, 70);
+  loupeCtx.stroke();
+  loupe.hidden = false;
+  // Put the loupe in the corner away from the finger.
+  const r = overlay.getBoundingClientRect();
+  const left = p[0] / photo!.width < 0.5;
+  loupe.style.left = left ? "" : "8px";
+  loupe.style.right = left ? "8px" : "";
+  loupe.style.top = `${$("photoWrap").offsetTop + 8 + (p[1] / photo!.height < 0.3 ? r.height - 156 : 0)}px`;
+}
+
+overlay.addEventListener("pointerdown", (e) => {
+  if (!photo) return;
+  const p = toImage(e);
+  let best = -1,
+    bestD = Math.max(photo.width, photo.height) * 0.15;
+  corners.forEach(([x, y], i) => {
+    const d = Math.hypot(x - p[0], y - p[1]);
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  });
+  if (best < 0) return;
+  drag = { i: best, dx: corners[best][0] - p[0], dy: corners[best][1] - p[1] };
+  overlay.setPointerCapture(e.pointerId);
+  showLoupe(corners[best]);
+  e.preventDefault();
+});
+overlay.addEventListener("pointermove", (e) => {
+  if (!drag || !photo) return;
+  const p = toImage(e);
+  const x = Math.min(photo.width, Math.max(0, p[0] + drag.dx));
+  const y = Math.min(photo.height, Math.max(0, p[1] + drag.dy));
+  corners[drag.i] = [x, y];
+  drawOverlay();
+  showLoupe([x, y]);
+});
+const endDrag = () => {
+  drag = null;
+  loupe.hidden = true;
+};
+overlay.addEventListener("pointerup", endDrag);
+overlay.addEventListener("pointercancel", endDrag);
+
+async function readBoard() {
+  if (!photo) return;
+  const btn = $<HTMLButtonElement>("readBtn");
+  btn.disabled = true;
+  showScanStatus(`<span class="spinner"></span> Reading the board…`);
   try {
-    const { recognizeBoard, rowsToPhotoGrid } = await vision();
-    const reading = await recognizeBoard({ apiKey, image: lastImage, signal: recognizeAbort.signal });
-    grid = photoGridToBoard(rowsToPhotoGrid(reading.rows), reading.white_side);
+    store.set("corners", JSON.stringify(corners.map(([x, y]) => [x / photo!.width, y / photo!.height])));
+    const guesses = await classifySquares(photo.data, corners);
+    const reading = decide(guesses, guessWhiteSide(guesses));
+    grid = reading.grid;
+    unsure = reading.uncertain;
     flipped = false;
-    positionChanged(true);
+    positionChanged(true, true);
+    const nUnsure = unsure.flat().filter(Boolean).length;
     const warn = checkPosition(grid, "w", castling()) && checkPosition(grid, "b", castling());
-    const conf = reading.confidence !== "high" ? ` Confidence: <b>${reading.confidence}</b>.` : "";
-    const notes = reading.notes ? ` <i>${escapeHtml(reading.notes)}</i>` : "";
     showScanStatus(
-      `✓ Board recognized.${conf} Please compare with your board and fix any square by tapping it.${notes}` +
+      `✓ Board read. Compare it with your board and tap any wrong square to fix it.` +
+        (nUnsure ? ` <b>${nUnsure}</b> square${nUnsure > 1 ? "s" : ""} marked in red need a check.` : "") +
+        ` If the pieces look turned, use <b>Rotate pieces 90°</b>.` +
         (warn ? `<br><b>Check:</b> ${escapeHtml(warn)}` : ""),
-      warn || reading.confidence === "low" ? "error" : "ok",
+      warn ? "error" : "ok",
     );
     $("positionCard").scrollIntoView({ behavior: "smooth", block: "start" });
     if (!warn) analyse();
   } catch (e) {
-    if ((e as Error).name === "AbortError") return;
-    showScanStatus(`Recognition failed: ${escapeHtml((e as Error).message)}`, "error");
+    showScanStatus(`Couldn't read the board: ${escapeHtml((e as Error).message)}`, "error");
   } finally {
-    $("rescanBtn").hidden = false;
+    btn.disabled = false;
   }
 }
 
@@ -405,21 +552,7 @@ function escapeHtml(s: string) {
   return s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
 }
 
-// ---------- settings ----------
-const dialog = $<HTMLDialogElement>("settings");
-function openSettings() {
-  $<HTMLInputElement>("apiKey").value = store.get("apiKey") ?? "";
-  dialog.showModal();
-}
-dialog.addEventListener("close", () => {
-  if (dialog.returnValue === "save") {
-    store.set("apiKey", $<HTMLInputElement>("apiKey").value.trim());
-    if (lastImage && store.get("apiKey")) recognize();
-  }
-});
-
 // ---------- wiring ----------
-$("settingsBtn").addEventListener("click", openSettings);
 $<HTMLInputElement>("cameraInput").addEventListener("change", (e) => {
   const input = e.target as HTMLInputElement;
   onPhoto(input.files?.[0]);
@@ -430,7 +563,7 @@ $<HTMLInputElement>("galleryInput").addEventListener("change", (e) => {
   onPhoto(input.files?.[0]);
   input.value = "";
 });
-$("rescanBtn").addEventListener("click", recognize);
+$("readBtn").addEventListener("click", readBoard);
 $("flipBtn").addEventListener("click", () => {
   flipped = !flipped;
   renderBoard();

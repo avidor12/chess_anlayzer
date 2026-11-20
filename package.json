@@ -18,9 +18,8 @@
   },
   "homepage": "https://github.com/avidor12/chess_anlayzer#readme",
   "dependencies": {
-    "@anthropic-ai/sdk": "^1.11.0",
     "chess.js": "^1.4.0",
-    "zod": "^4.6.7"
+    "onnxruntime-web": "^1.31.1"
   },
   "devDependencies": {
     "stockfish": "^19.0.1",

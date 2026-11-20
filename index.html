@@ -14,14 +14,13 @@
   <body>
     <header class="topbar">
       <h1>♞ Chess Scanner</h1>
-      <button id="settingsBtn" class="icon-btn" aria-label="Settings">⚙︎</button>
     </header>
 
     <main>
       <!-- 1. SCAN -->
       <section class="card" id="scanCard">
         <h2><span class="step">1</span> Scan the board</h2>
-        <p class="hint">Take a photo from above, with the whole board in frame and good light.</p>
+        <p class="hint">Take a photo from a player's side of the board, with the whole board in frame and good light.</p>
         <div class="row">
           <label class="btn primary grow">
             📷 Take photo
@@ -32,15 +31,23 @@
             <input id="galleryInput" type="file" accept="image/*" hidden />
           </label>
         </div>
-        <img id="preview" class="preview" alt="Board photo" hidden />
+
+        <div id="cornerStep" hidden>
+          <p class="hint step-hint">Drag the 4 circles onto the <b>corners of the 64 squares</b> (not the outer frame) so the grid lines up with the board.</p>
+          <div id="photoWrap" class="photo-wrap">
+            <img id="preview" class="photo" alt="Board photo" />
+            <svg id="overlay" class="overlay"></svg>
+          </div>
+          <div id="loupe" class="loupe" hidden><canvas width="140" height="140"></canvas></div>
+          <button id="readBtn" class="btn primary block">🔍 Read the board</button>
+        </div>
         <div id="scanStatus" class="status" hidden></div>
-        <button id="rescanBtn" class="btn" hidden>↻ Recognize again</button>
       </section>
 
       <!-- 2. POSITION -->
       <section class="card" id="positionCard">
         <h2><span class="step">2</span> Check the position</h2>
-        <p class="hint">Tap a square, then pick a piece to fix any mistakes.</p>
+        <p class="hint">Tap a square, then pick a piece to fix any mistakes. Squares outlined in red are ones the scanner was unsure about.</p>
 
         <div class="board-wrap">
           <div id="evalBar" class="eval-bar" aria-label="Evaluation bar">
@@ -123,27 +130,6 @@
         <p id="engineStatus" class="hint small"></p>
       </section>
     </main>
-
-    <!-- Settings dialog -->
-    <dialog id="settings">
-      <form method="dialog">
-        <h2>Settings</h2>
-        <p class="hint">
-          Board recognition uses Claude's vision. Paste an
-          <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">Anthropic API key</a>.
-          It is stored only on this device and sent only to api.anthropic.com.
-        </p>
-        <label class="field">
-          API key
-          <input id="apiKey" type="password" autocomplete="off" placeholder="sk-ant-..." />
-        </label>
-        <p class="hint small">No key? You can still set up the position by hand on the board and analyze it — the chess engine runs entirely on your phone.</p>
-        <div class="row end">
-          <button value="cancel" class="btn">Cancel</button>
-          <button id="saveSettings" value="save" class="btn primary">Save</button>
-        </div>
-      </form>
-    </dialog>
 
     <script type="module" src="/src/main.ts"></script>
   </body>
