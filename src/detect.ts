@@ -1,5 +1,9 @@
 // Automatic chessboard localisation in a photo (pure TypeScript, no dependencies).
 //
+// Two methods, the better result wins:
+//  A. X-corners (ChESS response) where four squares meet, fitted to a perspective lattice
+//     by growing a homography from one cell; robust to wood grain, carpets and clutter.
+//  B. Lines:
 // 1. Canny edges on a downscaled grey image.
 // 2. Hough transform -> straight lines, split into the two grid directions.
 // 3. RANSAC over pairs of neighbouring lines from each direction: each guess defines a
@@ -18,13 +22,43 @@ export type P = [number, number];
 type Line = { rho: number; theta: number; votes: number; t: number };
 
 const WORK = 640;
+const WORK_X = 800;
 
 export interface Detection {
   corners: P[]; // in the input image's pixel coordinates, any order
   score: number; // 0..1, how sure we are
 }
 
+type Candidate = Detection & { quality: number };
+
+/** Find the 8x8 grid of a chessboard in a photo. Tries two methods and keeps the better. */
 export function detectBoard(img: Img): Detection | null {
+  const cands = [detectByXCorners(img), detectByLines(img)].filter((c): c is Candidate => !!c);
+  if (!cands.length) return null;
+  cands.sort((a, b) => b.quality - a.quality);
+  return { corners: cands[0].corners, score: cands[0].score };
+}
+
+/** Method 1: the board's X-corners (where four squares meet), fitted to a lattice. */
+function detectByXCorners(img: Img): Candidate | null {
+  const scale = Math.min(1, WORK_X / Math.max(img.width, img.height));
+  const W = Math.max(1, Math.round(img.width * scale));
+  const H = Math.max(1, Math.round(img.height * scale));
+  const gray = gaussian(toGray(img, W, H), W, H);
+  let best: Candidate | null = null;
+  for (const r of [4, 7]) {
+    const pts = xCorners(gray, W, H, r);
+    if (pts.length < 9) continue;
+    const fit = fitPointLattice(pts);
+    if (!fit) continue;
+    const c = finish(fit.H, fit.inliers, gray, W, H, scale, img, true);
+    if (c && (!best || c.quality > best.quality)) best = c;
+  }
+  return best;
+}
+
+/** Method 2: straight lines (Hough), fitted to a lattice. */
+function detectByLines(img: Img): Candidate | null {
   const scale = Math.min(1, WORK / Math.max(img.width, img.height));
   const W = Math.max(1, Math.round(img.width * scale));
   const H = Math.max(1, Math.round(img.height * scale));
@@ -39,9 +73,23 @@ export function detectBoard(img: Img): Detection | null {
   orderFamily(B, W, H);
   const fit = fitLattice(A, B, W, H);
   if (!fit) return null;
-  const win = chooseWindow(fit.H, fit.inliers, blurred, W, H);
+  return finish(fit.H, fit.inliers, blurred, W, H, scale, img);
+}
+
+/** Pick the 8x8 window, map it back to the photo and sanity-check the result. */
+function finish(
+  Hm: M3,
+  inliers: { p: P; q: P }[],
+  gray: Float32Array,
+  W: number,
+  H: number,
+  scale: number,
+  img: Img,
+  innerPoints = false,
+): Candidate | null {
+  const win = chooseWindow(Hm, inliers, gray, W, H, innerPoints);
   if (!win) return null;
-  const inv = invert3(fit.H);
+  const inv = invert3(Hm);
   const corners = (
     [
       [win.x, win.y],
@@ -53,7 +101,7 @@ export function detectBoard(img: Img): Detection | null {
     const [u, v] = applyH(inv, x, y);
     return [u / scale, v / scale] as P;
   });
-  // Sanity: neighbouring squares must have similar sizes (perspective changes them slowly).
+  // Neighbouring squares must have similar sizes (perspective changes them slowly).
   for (const axis of [0, 1]) {
     for (const m of [0.5, 4, 7.5]) {
       const pts = Array.from({ length: 9 }, (_, k) =>
@@ -62,19 +110,168 @@ export function detectBoard(img: Img): Detection | null {
       const gaps = pts.slice(1).map((p, k) => Math.hypot(p[0] - pts[k][0], p[1] - pts[k][1]));
       for (let k = 1; k < gaps.length; k++) {
         const r = gaps[k] / gaps[k - 1];
-        if (r > 1.35 || r < 1 / 1.35) return null;
+        if (!(r < 1.35 && r > 1 / 1.35)) return null;
       }
     }
   }
-  // Sanity: the board must be reasonably big and mostly inside the photo.
+  // The board must be reasonably big and mostly inside the photo.
   const area = Math.abs(polyArea(corners));
-  if (area < 0.04 * img.width * img.height) return null;
+  if (area < 0.02 * img.width * img.height) return null;
   const inside = corners.filter(
     ([x, y]) => x > -0.05 * img.width && y > -0.05 * img.height && x < 1.05 * img.width && y < 1.05 * img.height,
   ).length;
   if (inside < 4) return null;
-  const score = Math.min(1, fit.inliers.length / 40) * Math.min(1, win.contrast / 40);
-  return { corners, score };
+  // Inliers that fall inside the chosen window are the evidence for it.
+  const support = inliers.filter(
+    ({ q }) => q[0] >= win.x && q[0] <= win.x + 8 && q[1] >= win.y && q[1] <= win.y + 8,
+  ).length;
+  const score = Math.min(1, support / 30) * Math.min(1, win.contrast / 40);
+  return { corners, score, quality: win.contrast * Math.min(1, support / 30) };
+}
+
+// ---------- X-corners ----------
+
+/**
+ * ChESS corner response (Bennett & Lasenby 2014): high where four squares meet in an
+ * X, low on edges, blobs and textures such as wood grain.
+ */
+export function xCorners(g: Float32Array, W: number, H: number, r: number): P[] {
+  const ring: [number, number][] = [];
+  for (let n = 0; n < 16; n++) {
+    const a = (n * Math.PI) / 8;
+    ring.push([Math.round(r * Math.cos(a)), Math.round(r * Math.sin(a))]);
+  }
+  const resp = new Float32Array(W * H);
+  const I = new Float32Array(16);
+  let max = 0;
+  for (let y = r + 1; y < H - r - 1; y++)
+    for (let x = r + 1; x < W - r - 1; x++) {
+      let mean = 0;
+      for (let n = 0; n < 16; n++) {
+        I[n] = g[(y + ring[n][1]) * W + x + ring[n][0]];
+        mean += I[n];
+      }
+      mean /= 16;
+      let sr = 0,
+        dr = 0;
+      for (let n = 0; n < 4; n++) sr += Math.abs(I[n] + I[n + 8] - I[n + 4] - I[n + 12]);
+      for (let n = 0; n < 8; n++) dr += Math.abs(I[n] - I[n + 8]);
+      const c = (g[y * W + x] + g[y * W + x - 1] + g[y * W + x + 1] + g[(y - 1) * W + x] + g[(y + 1) * W + x]) / 5;
+      const v = sr - dr - 16 * Math.abs(mean - c);
+      if (v > 0) {
+        resp[y * W + x] = v;
+        if (v > max) max = v;
+      }
+    }
+  const thr = Math.max(60, max * 0.12);
+  const R = Math.max(3, r);
+  const out: { p: P; v: number }[] = [];
+  for (let y = R; y < H - R; y++)
+    for (let x = R; x < W - R; x++) {
+      const v = resp[y * W + x];
+      if (v < thr) continue;
+      let isMax = true;
+      for (let dy = -R; dy <= R && isMax; dy++)
+        for (let dx = -R; dx <= R; dx++) {
+          if ((dx || dy) && resp[(y + dy) * W + x + dx] > v) {
+            isMax = false;
+            break;
+          }
+        }
+      if (!isMax) continue;
+      // Sub-pixel refinement: weighted centroid of the response around the peak.
+      let sx = 0,
+        sy = 0,
+        sw = 0;
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++) {
+          const w = resp[(y + dy) * W + x + dx];
+          sx += w * dx;
+          sy += w * dy;
+          sw += w;
+        }
+      out.push({ p: [x + sx / sw, y + sy / sw], v });
+    }
+  out.sort((a, b) => b.v - a.v);
+  return out.slice(0, 250).map((o) => o.p);
+}
+
+/** Fit a perspective lattice to X-corner points: corners land on integer lattice points. */
+export function fitPointLattice(pts: P[]): { H: M3; inliers: { p: P; q: P }[] } | null {
+  const TOL = 0.18;
+  const project = (Hm: M3) => {
+    const inl: { p: P; q: P }[] = [];
+    for (const p of pts) {
+      const [u, v] = applyH(Hm, p[0], p[1]);
+      if (!isFinite(u) || Math.abs(u) > 12 || Math.abs(v) > 12) continue;
+      const ru = Math.round(u),
+        rv = Math.round(v);
+      if (Math.abs(u - ru) < TOL && Math.abs(v - rv) < TOL) inl.push({ p, q: [ru, rv] });
+    }
+    return inl;
+  };
+  // Distinct lattice points only (two corners on one lattice point is a bad sign).
+  const distinct = (inl: { q: P }[]) => new Set(inl.map((x) => `${x.q[0]},${x.q[1]}`)).size;
+
+  const top: { best: { H: M3; n: number } | null } = { best: null };
+  const seeds = pts.slice(0, 80);
+  for (const p of seeds) {
+    const nb = pts
+      .filter((q) => q !== p)
+      .map((q) => ({ q, d: Math.hypot(q[0] - p[0], q[1] - p[1]) }))
+      .sort((a, b) => a.d - b.d)
+      .slice(0, 8);
+    for (let i = 0; i < nb.length; i++)
+      for (let j = i + 1; j < nb.length; j++) {
+        const a = nb[i].q,
+          b = nb[j].q;
+        const v1: P = [a[0] - p[0], a[1] - p[1]],
+          v2: P = [b[0] - p[0], b[1] - p[1]];
+        const l1 = Math.hypot(...v1),
+          l2 = Math.hypot(...v2);
+        if (l1 / l2 > 2.5 || l2 / l1 > 2.5) continue;
+        const cos = (v1[0] * v2[0] + v1[1] * v2[1]) / (l1 * l2);
+        if (Math.abs(cos) > 0.8) continue; // nearly parallel
+        // The fourth corner of the cell must exist too.
+        const exp: P = [a[0] + v2[0], a[1] + v2[1]];
+        let c: P | null = null;
+        let cd = 0.25 * Math.min(l1, l2);
+        for (const q of pts) {
+          const d = Math.hypot(q[0] - exp[0], q[1] - exp[1]);
+          if (d < cd) {
+            cd = d;
+            c = q;
+          }
+        }
+        if (!c) continue;
+        let Hm = homography([p, a, c, b], [[0, 0], [1, 0], [1, 1], [0, 1]]);
+        if (!Hm) continue;
+        // Grow: refit on inliers a few times (the first guess is only locally accurate).
+        let inl = project(Hm);
+        for (let it = 0; it < 3 && inl.length >= 4; it++) {
+          const next = homography(inl.map((x) => x.p), inl.map((x) => x.q));
+          if (!next) break;
+          Hm = next;
+          inl = project(Hm);
+        }
+        const n = distinct(inl);
+        if (!top.best || n > top.best.n) top.best = { H: Hm, n };
+      }
+    if (top.best && top.best.n >= 45) break; // a full 7x7 inner grid found
+  }
+  const best = top.best;
+  if (!best || best.n < 9) return null;
+  // Final refit, keeping one point per lattice node.
+  let inl = project(best.H);
+  const seen = new Set<string>();
+  inl = inl.filter((x) => {
+    const k = `${x.q[0]},${x.q[1]}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  const Hm = homography(inl.map((x) => x.p), inl.map((x) => x.q));
+  return Hm ? { H: Hm, inliers: project(Hm) } : null;
 }
 
 // ---------- image basics ----------
@@ -489,7 +686,14 @@ export function fitLattice(A: Line[], B: Line[], W: number, H: number): Fit | nu
 }
 
 /** Choose the 8x8 block of lattice cells with the strongest checkerboard pattern. */
-function chooseWindow(Hm: M3, inliers: { p: P; q: P }[], gray: Float32Array, W: number, H: number) {
+function chooseWindow(
+  Hm: M3,
+  inliers: { p: P; q: P }[],
+  gray: Float32Array,
+  W: number,
+  H: number,
+  innerPoints = false,
+) {
   const xs = inliers.map((x) => x.q[0]),
     ys = inliers.map((x) => x.q[1]);
   const xmin = Math.min(...xs),
@@ -537,6 +741,14 @@ function chooseWindow(Hm: M3, inliers: { p: P; q: P }[], gray: Float32Array, W: 
           else ((i + j) % 2 ? odd : even).push(c);
         }
       if (missing > 12) continue;
+      // Grid corners only exist on the board (inside, or on its edge when the board
+      // has a frame line), so the window must contain (nearly) all of them.
+      let outFrac = 0;
+      if (innerPoints) {
+        let out = 0;
+        for (const { q } of inliers) if (q[0] < x || q[0] > x + 8 || q[1] < y || q[1] > y + 8) out++;
+        outFrac = out / Math.max(1, inliers.length);
+      }
       const sign = med(even) > med(odd) ? 1 : -1;
       // Every one of the 8 columns and 8 rows must alternate light/dark the same way;
       // a border strip or the table next to the board does not.
@@ -553,7 +765,7 @@ function chooseWindow(Hm: M3, inliers: { p: P; q: P }[], gray: Float32Array, W: 
           const d = sign * (med(e) - med(o));
           total += isNaN(d) ? 0 : Math.max(0, d);
         }
-      const contrast = total / 16;
+      const contrast = (total / 16) * Math.max(0, 1 - 1.5 * outFrac);
       if (!best || contrast > best.contrast) best = { x, y, contrast };
     }
   return best && best.contrast > 8 ? best : null;

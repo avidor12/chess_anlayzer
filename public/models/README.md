@@ -1,32 +1,37 @@
----
-license: mit
-library_name: onnx
-tags:
-  - chess
-  - onnx
-  - computer-vision
----
+# Board recognition models
 
-# Chess board photo classifiers, ONNX
-
-Two MobileNetV3-Small classifiers for reading a photo of a physical chessboard, used by
-[CrispChess](https://github.com/CrispStrobe/CrispChess) together with a Dart port of
-[chesscog](https://github.com/georg-wolflein/chesscog)'s board localisation and crops
-(Georg Wölflein and Ognjen Arandjelović, *J. Imaging* 2021, MIT).
+Two ONNX image classifiers read a photo of a physical chessboard, one square at a time,
+after the board has been located (`src/detect.ts`) and each square cut out with
+[chesscog](https://github.com/georg-wolflein/chesscog)'s crop geometry (Georg Wölflein and
+Ognjen Arandjelović, *J. Imaging* 2021, MIT).
 
 | File | Input | Output |
 |---|---|---|
-| `board_photo_occupancy.onnx` | 100×100 square crops (chesscog's occupancy crop) | empty / occupied |
-| `board_photo_pieces.onnx` | 100×200 piece crops (chesscog's piece crop) | 12 piece classes |
+| `board_photo_occupancy.onnx` | 100×100 square crop | empty / occupied |
+| `pieces.onnx` | 100×200 piece crop (taller, so the whole piece is in view) | 12 piece classes |
 
-Trained for CrispChess (MIT) from torchvision's ImageNet-initialised MobileNetV3-Small
-(BSD-3) on:
+Inputs are RGB, scaled to 0–1 and normalised with the ImageNet mean and std, NCHW.
+Piece classes, in output order: `b k n p q r B K N P Q R` (lower case black, upper case white).
 
-- chesscog's synthetic renders (OSF xf3ka), CC BY 4.0;
-- [samryan18/chess-dataset](https://github.com/samryan18/chess-dataset), © 2019 Samuel Ryan,
-  Mukund Venkateswaran, Kurt Convey, Michael Deng, MIT;
-- Roboflow 100 "chess pieces" (`chess-pieces-mjzgj`), CC BY 4.0.
+## `pieces.onnx` — trained for this app
 
-**Accuracy** (end to end with the localiser): 99.6–99.9% of squares on held-out photos of
-the piece sets seen in training; 85% of squares (every error a piece type or colour) on
-chesscog's photos of an unseen wooden set. Unusual sets need checking.
+MobileNetV3-Large (timm `mobilenetv3_large_100.ra_in1k`, ImageNet weights, Apache-2.0),
+fine-tuned on ~45,000 piece crops cut from labelled photos of real boards:
+
+- **ChessReD** — Athanasios Masouris and Jan van Gemert, *End-to-End Chess Recognition*,
+  VISAPP 2024 (photos taken by the authors), **CC BY-NC-SA 4.0**, via
+  [acapitani/chesspiece-detection-yolo](https://huggingface.co/datasets/acapitani/chesspiece-detection-yolo)
+  (MIT for the annotations and additional photos);
+- Roboflow "chess pieces" (`chess-pieces-mjzgj`), **CC BY 4.0**;
+- [surawut/chess-pieces-dataset-yolo](https://huggingface.co/datasets/surawut/chess-pieces-dataset-yolo), **CC BY 4.0**.
+
+Because part of its training data is CC BY-NC-SA 4.0, **this model is released under
+CC BY-NC-SA 4.0: free to use, share and adapt for non-commercial purposes, with credit,
+under the same licence.**
+
+## `board_photo_occupancy.onnx`
+
+From [cstr/chess-board-photo-onnx](https://huggingface.co/cstr/chess-board-photo-onnx)
+(MIT), trained for [CrispChess](https://github.com/CrispStrobe/CrispChess) from
+MobileNetV3-Small on chesscog's synthetic renders (CC BY 4.0), samryan18/chess-dataset
+(MIT) and Roboflow "chess pieces" (CC BY 4.0).

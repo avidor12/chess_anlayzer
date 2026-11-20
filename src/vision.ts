@@ -1,10 +1,10 @@
 // On-device board recognition from a photo.
 //
 // Pipeline (after chesscog by Wölflein & Arandjelović, MIT):
-//   1. the user marks the four corners of the 8x8 grid,
+//   1. the 8x8 grid is found in the photo (src/detect.ts), or marked by the user,
 //   2. each square is cut out of the perspective-corrected board (the piece crop is
 //      taller than the square, so it contains the whole piece standing on it),
-//   3. two small MobileNetV3 classifiers (cstr/chess-board-photo-onnx, MIT) decide
+//   3. two MobileNetV3 classifiers (see public/models/README.md) decide
 //      empty/occupied and, for occupied squares, which of the 12 pieces it is.
 // Everything runs in the browser with onnxruntime-web — no server, no API key.
 import * as ort from "onnxruntime-web/wasm";
@@ -213,7 +213,7 @@ let sessions: Promise<[ort.InferenceSession, ort.InferenceSession]> | null = nul
 export function loadModels() {
   sessions ??= Promise.all([
     ort.InferenceSession.create(`${BASE}models/board_photo_occupancy.onnx`),
-    ort.InferenceSession.create(`${BASE}models/board_photo_pieces.onnx`),
+    ort.InferenceSession.create(`${BASE}models/pieces.onnx`),
   ]).catch((e) => {
     sessions = null;
     throw e;
@@ -283,7 +283,7 @@ export function guessWhiteSide(guesses: SquareGuess[][]): WhiteSide {
     }),
   );
   if (!wn || !bn) return "bottom";
-  const dv = br / bn - wr / wn; // > 0: white lower in the photo
+  const dv = wr / wn - br / bn; // > 0: white lower in the photo
   const dh = bc / bn - wc / wn; // > 0: white further left
   if (Math.abs(dv) >= Math.abs(dh)) return dv >= 0 ? "bottom" : "top";
   return dh >= 0 ? "left" : "right";

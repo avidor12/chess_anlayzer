@@ -39,6 +39,18 @@ Turn it on once in **Settings → Pages → Source: GitHub Actions**.
 
 Vite + TypeScript, no framework. `chess.js` handles legality checks and move notation, Stockfish 19 lite (single-threaded WASM, in `public/engine/`) handles analysis, and onnxruntime-web runs the recognition models.
 
-- Board recognition models: [cstr/chess-board-photo-onnx](https://huggingface.co/cstr/chess-board-photo-onnx) (MIT), from CrispChess. The square-crop method is from [chesscog](https://github.com/georg-wolflein/chesscog) by Georg Wölflein & Ognjen Arandjelović (MIT). See `public/models/README.md` for the training-data credits.
+- **Board finding** (`src/detect.ts`): ChESS X-corner detection (Bennett & Lasenby) plus a Hough line method, each fitted to a perspective lattice. It's inspired by [chesscog](https://github.com/georg-wolflein/chesscog) (Wölflein & Arandjelović, MIT).
+- **Piece model** (`public/models/pieces.onnx`): MobileNetV3-Large, trained for this app on about 45,000 pieces from labelled photos of real boards: ChessReD (Masouris & van Gemert), Roboflow "chess pieces" and surawut/chess-pieces-dataset-yolo. Because ChessReD is CC BY-NC-SA 4.0, **this model is CC BY-NC-SA 4.0 (non-commercial use only)**. See `public/models/README.md`.
+- **Empty/occupied model**: from [cstr/chess-board-photo-onnx](https://huggingface.co/cstr/chess-board-photo-onnx) (MIT).
 - Stockfish: GPLv3 (`public/engine/LICENSE-stockfish.txt`).
 - Piece images: "cburnett" by Colin M.L. Burnett.
+
+### Measured accuracy
+
+The test photos come from games that were never used for training:
+
+| Test set | Board found | Piece errors / board (before → now) | Perfect boards (before → now) |
+|---|---|---|---|
+| Tournament board, many angles (ChessReD game 0) | 38% → 83% | 7.3 → 0.4 | 0 → 50 of 86 |
+| Black-and-white board, from above | → 86% | 8.1 → 2.8 | 0 → 0 of 37 |
+| Green board (Roboflow test) | 100% | 0.07 → 0.03 | 54 → 56 of 58 |
