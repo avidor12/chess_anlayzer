@@ -1,0 +1,32 @@
+{
+  "name": "chess-scanner",
+  "version": "1.0.0",
+  "description": "Scan a chess board with your phone camera, get the best move for each side and an evaluation bar.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/avidor12/chess_anlayzer.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/avidor12/chess_anlayzer/issues"
+  },
+  "homepage": "https://github.com/avidor12/chess_anlayzer#readme",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.11.0",
+    "chess.js": "^1.4.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "stockfish": "^19.0.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  },
+  "private": true,
+  "type": "module"
+}

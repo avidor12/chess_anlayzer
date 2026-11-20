@@ -1,0 +1,11 @@
+{
+  "name": "Chess Scanner",
+  "short_name": "Chess Scan",
+  "description": "Scan a chess board with your camera and get the best move for each side.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#15171c",
+  "theme_color": "#1b1d22",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#1b1d22" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./icon.svg" />
+    <title>Chess Scanner</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>♞ Chess Scanner</h1>
+      <button id="settingsBtn" class="icon-btn" aria-label="Settings">⚙︎</button>
+    </header>
+
+    <main>
+      <!-- 1. SCAN -->
+      <section class="card" id="scanCard">
+        <h2><span class="step">1</span> Scan the board</h2>
+        <p class="hint">Take a photo from above, with the whole board in frame and good light.</p>
+        <div class="row">
+          <label class="btn primary grow">
+            📷 Take photo
+            <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden />
+          </label>
+          <label class="btn grow">
+            🖼️ Choose image
+            <input id="galleryInput" type="file" accept="image/*" hidden />
+          </label>
+        </div>
+        <img id="preview" class="preview" alt="Board photo" hidden />
+        <div id="scanStatus" class="status" hidden></div>
+        <button id="rescanBtn" class="btn" hidden>↻ Recognize again</button>
+      </section>
+
+      <!-- 2. POSITION -->
+      <section class="card" id="positionCard">
+        <h2><span class="step">2</span> Check the position</h2>
+        <p class="hint">Tap a square, then pick a piece to fix any mistakes.</p>
+
+        <div class="board-wrap">
+          <div id="evalBar" class="eval-bar" aria-label="Evaluation bar">
+            <div id="evalFill" class="eval-fill"></div>
+            <span id="evalLabel" class="eval-label">0.0</span>
+          </div>
+          <div class="board-holder">
+            <div id="board" class="board"></div>
+            <svg id="arrows" class="arrows" viewBox="0 0 800 800" aria-hidden="true">
+              <defs>
+                <marker id="headW" markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto">
+                  <path d="M0,0 L4,2 L0,4 Z" fill="#3fa9f5" />
+                </marker>
+                <marker id="headB" markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto">
+                  <path d="M0,0 L4,2 L0,4 Z" fill="#f5793f" />
+                </marker>
+              </defs>
+            </svg>
+          </div>
+        </div>
+
+        <div id="palette" class="palette" hidden></div>
+
+        <div class="row wrap tools">
+          <button id="flipBtn" class="btn small">⇅ Flip view</button>
+          <button id="rotateBtn" class="btn small">⟳ Rotate pieces 90°</button>
+          <button id="startBtn" class="btn small">Start position</button>
+          <button id="clearBtn" class="btn small">Clear</button>
+        </div>
+
+        <details class="castling">
+          <summary>Castling rights &amp; FEN</summary>
+          <div class="row wrap">
+            <label><input type="checkbox" id="cK" /> White O-O</label>
+            <label><input type="checkbox" id="cQ" /> White O-O-O</label>
+            <label><input type="checkbox" id="ck" /> Black O-O</label>
+            <label><input type="checkbox" id="cq" /> Black O-O-O</label>
+          </div>
+          <div class="row">
+            <input id="fenInput" class="fen" spellcheck="false" autocomplete="off" />
+            <button id="fenLoad" class="btn small">Load</button>
+          </div>
+        </details>
+      </section>
+
+      <!-- 3. ANALYSIS -->
+      <section class="card" id="analysisCard">
+        <h2><span class="step">3</span> Analysis</h2>
+        <div class="row">
+          <span class="label">Whose turn?</span>
+          <div class="seg" role="radiogroup">
+            <button class="seg-btn active" data-turn="w">White</button>
+            <button class="seg-btn" data-turn="b">Black</button>
+          </div>
+        </div>
+        <div class="row">
+          <span class="label">Depth</span>
+          <div class="seg" role="radiogroup">
+            <button class="seg-btn" data-time="1500">Fast</button>
+            <button class="seg-btn active" data-time="4000">Normal</button>
+            <button class="seg-btn" data-time="10000">Deep</button>
+          </div>
+        </div>
+        <button id="analyzeBtn" class="btn primary block">♟ Analyze position</button>
+
+        <div id="verdict" class="verdict" hidden></div>
+
+        <div class="moves">
+          <div class="side-card white" id="whiteCard">
+            <h3><span class="dot w"></span> White's best move</h3>
+            <div class="best" id="whiteBest">—</div>
+            <ol class="alts" id="whiteAlts"></ol>
+          </div>
+          <div class="side-card black" id="blackCard">
+            <h3><span class="dot b"></span> Black's best move</h3>
+            <div class="best" id="blackBest">—</div>
+            <ol class="alts" id="blackAlts"></ol>
+          </div>
+        </div>
+        <p id="engineStatus" class="hint small"></p>
+      </section>
+    </main>
+
+    <!-- Settings dialog -->
+    <dialog id="settings">
+      <form method="dialog">
+        <h2>Settings</h2>
+        <p class="hint">
+          Board recognition uses Claude's vision. Paste an
+          <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">Anthropic API key</a>.
+          It is stored only on this device and sent only to api.anthropic.com.
+        </p>
+        <label class="field">
+          API key
+          <input id="apiKey" type="password" autocomplete="off" placeholder="sk-ant-..." />
+        </label>
+        <p class="hint small">No key? You can still set up the position by hand on the board and analyze it — the chess engine runs entirely on your phone.</p>
+        <div class="row end">
+          <button value="cancel" class="btn">Cancel</button>
+          <button id="saveSettings" value="save" class="btn primary">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
