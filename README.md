@@ -5,39 +5,38 @@ Scan a chess board with your phone camera. The app reads the position and shows:
 - **Best move for White and for Black** (plus 2 alternatives each), drawn as arrows on the board
 - **An evaluation bar** showing who has the upper hand, with a plain-language verdict ("White is clearly better", "Black has mate in 3", …)
 
+Everything runs **on your phone**. There's no account, no API key, and no server, so anyone can use it for free.
+
+**Open it:** https://avidor12.github.io/chess_anlayzer/ (on your phone, use "Add to Home Screen" to get an app icon)
+
 ## How it works
 
-1. **Scan**: take a photo (or pick one from your gallery). Claude's vision model (`claude-opus-5-5`) reads the 64 squares and works out which side of the photo White is on, so you can shoot from any side of the board.
-2. **Check**: the position appears on an editable board. Tap a square, then pick a piece to fix any mistakes. You can also rotate, flip, reset, clear, set castling rights, or paste a FEN.
-3. **Analyze**: Stockfish 19 (WebAssembly) runs **on your phone**. It finds the best move with White to move and with Black to move. Choose whose turn it really is, and the eval bar shows the score from that side's point of view.
+1. **Scan**: take a photo of the board from a player's side, then drag the 4 green circles onto the corners of the 64 squares. A magnifier helps you place them exactly. The app remembers the corners for your next scan.
+2. **Read**: two small neural networks (MobileNetV3, about 6 MB each, run with onnxruntime-web) decide for each square whether it's empty and which piece is on it. The app works out which side White is on, applies basic chess rules (one king each, no pawns on the back ranks), and outlines in red any square it's unsure about.
+3. **Check**: fix any mistake by tapping a square and picking a piece. You can also rotate, flip, reset, clear, set castling rights, or paste a FEN.
+4. **Analyze**: Stockfish 19 (WebAssembly) finds the best move with White to move and with Black to move. Choose whose turn it really is, and the eval bar shows the score from that side's point of view.
 
-## Setup
+Recognition works best on standard tournament-style (Staunton) pieces with even light. Unusual or decorative sets may need a few squares corrected.
 
-You need an [Anthropic API key](https://console.anthropic.com/settings/keys) for photo recognition. Tap ⚙︎ in the app and paste it. The key stays in your browser's local storage and goes only to `api.anthropic.com`. Without a key you can still set up the position by hand and analyze it.
-
-### Run locally
+## Development
 
 ```bash
 npm install
 npm run dev        # serves on your LAN, so you can open it on your phone
+npm run build      # production build in dist/
 ```
 
-Phone cameras need **HTTPS** (or `localhost`) for the camera input to open the camera directly. The easiest way is to deploy:
+For the camera to open directly, phones need the page served over **HTTPS** (or from `localhost`).
 
 ### Deploy to GitHub Pages
 
-The workflow in `.github/workflows/deploy.yml` builds and publishes the app on every push to `main`.
-Turn it on in **Settings → Pages → Source: GitHub Actions**. The app is then available at
-`https://<user>.github.io/chess_anlayzer/`. Open it on your phone and use "Add to Home Screen" to get an app icon.
+`.github/workflows/deploy.yml` builds and publishes the app on every push to `main`.
+Turn it on once in **Settings → Pages → Source: GitHub Actions**.
 
-## Tips for good scans
+## Tech & credits
 
-- Shoot from above or at a moderate angle, with the whole board in frame
-- Even lighting, no strong glare
-- If the pieces come out rotated, use **Rotate pieces 90°**
+Vite + TypeScript, no framework. `chess.js` handles legality checks and move notation, Stockfish 19 lite (single-threaded WASM, in `public/engine/`) handles analysis, and onnxruntime-web runs the recognition models.
 
-## Tech
-
-Vite + TypeScript, no framework. `chess.js` handles legality checks and move notation, `stockfish` 19 lite (single-threaded WASM, about 1.8 MB, in `public/engine/`) handles analysis, and `@anthropic-ai/sdk` with structured outputs handles board recognition.
-
-Licenses: Stockfish is GPLv3 (`public/engine/LICENSE-stockfish.txt`). The piece set is "cburnett" by Colin M.L. Burnett.
+- Board recognition models: [cstr/chess-board-photo-onnx](https://huggingface.co/cstr/chess-board-photo-onnx) (MIT), from CrispChess. The square-crop method is from [chesscog](https://github.com/georg-wolflein/chesscog) by Georg Wölflein & Ognjen Arandjelović (MIT). See `public/models/README.md` for the training-data credits.
+- Stockfish: GPLv3 (`public/engine/LICENSE-stockfish.txt`).
+- Piece images: "cburnett" by Colin M.L. Burnett.
